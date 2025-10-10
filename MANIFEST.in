@@ -16,6 +16,8 @@ include libstempo/multinest.py
 include libstempo/plot.py
 include libstempo/spharmORFbasis.py
 include libstempo/toasim.py
+include libstempo/sandbox.py
+include libstempo/tim_file_analyzer.py
 include libstempo/ecc_vs_nharm.txt
 include demo/libstempo-demo.ipynb
 include demo/libstempo-toasim-demo.ipynb

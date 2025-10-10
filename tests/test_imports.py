@@ -6,3 +6,5 @@ def test_imports():
     import libstempo.toasim  # noqa:F401
     import libstempo.eccUtils  # noqa: F401
     import libstempo.spharmORFbasis  # noqa: F401
+    import libstempo.sandbox  # noqa: F401
+    import libstempo.tim_file_analyzer  # noqa: F401
