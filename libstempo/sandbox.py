@@ -126,18 +126,12 @@ class Policy:
     preload_fit: bool = False  # call fit() once after ctor
 
     # RPC protection
-    call_timeout_s: Optional[float] = (
-        None  # per-call timeout (seconds), None = no timeout
-    )
+    call_timeout_s: Optional[float] = None  # per-call timeout (seconds), None = no timeout
     kill_grace_s: float = 2.0  # after timeout, wait before SIGKILL
 
     # Recycling / hygiene
-    max_calls_per_worker: Optional[int] = (
-        None  # recycle after this many good calls, None = never recycle by calls
-    )
-    max_age_s: Optional[float] = (
-        None  # recycle after this many seconds, None = never recycle by age
-    )
+    max_calls_per_worker: Optional[int] = None  # recycle after this many good calls, None = never recycle by calls
+    max_age_s: Optional[float] = None  # recycle after this many seconds, None = never recycle by age
     rss_soft_limit_mb: Optional[int] = None  # if provided, recycle when beaten
 
     # Proactive TOA handling for large files
@@ -219,16 +213,14 @@ def _worker_stdio_main() -> None:
     try:
         try:
             from libstempo import tempopulsar as _lib_tempopulsar  # noqa
-            import numpy as _np  # noqa
+            import numpy  # noqa
 
             hello["hello"]["has_libstempo"] = True
             # best-effort tempo2 version probe
             try:
                 from libstempo import tempo2  # type: ignore
 
-                hello["hello"]["tempo2_version"] = getattr(
-                    tempo2, "TEMPO2_VERSION", None
-                )
+                hello["hello"]["tempo2_version"] = getattr(tempo2, "TEMPO2_VERSION", None)
             except Exception:
                 pass
         except Exception:
@@ -240,11 +232,10 @@ def _worker_stdio_main() -> None:
     # If libstempo failed to import at hello, try once more here to return clean errors
     try:
         from libstempo import tempopulsar as _lib_tempopulsar  # noqa
-        import numpy as _np  # noqa
+        import numpy  # noqa
     except Exception:
         # Keep serving, but report on first request
         _lib_tempopulsar: Optional[Any] = None
-        _np: Optional[Any] = None
 
     obj = None
 
@@ -299,16 +290,12 @@ def _worker_stdio_main() -> None:
         # Handle methods
         try:
             if method == "bye":
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py("bye")}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py("bye")})
                 return
 
             if method == "rss":
                 rss = _current_rss_mb_portable()
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(rss)}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(rss)})
                 continue
 
             if method == "ctor":
@@ -365,17 +352,13 @@ def _worker_stdio_main() -> None:
                         val = val.copy()
                 except Exception:
                     pass
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(val)}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(val)})
                 continue
 
             if method == "set":
                 name, value = params["name"], params["value"]
                 setattr(obj, name, value)
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)})
                 continue
 
             if method == "call":
@@ -391,9 +374,7 @@ def _worker_stdio_main() -> None:
                         out = out.copy()
                 except Exception:
                     pass
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(out)}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(out)})
                 continue
 
             if method == "del":
@@ -402,9 +383,7 @@ def _worker_stdio_main() -> None:
                 except Exception:
                     pass
                 obj = None
-                _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)}
-                )
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)})
                 continue
 
             _write_response(
@@ -453,9 +432,7 @@ class _WorkerProc:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
 
-        logger.debug(
-            f"Launching subprocess with environment: PYTHONUNBUFFERED={env.get('PYTHONUNBUFFERED')}"
-        )
+        logger.debug(f"Launching subprocess with environment: PYTHONUNBUFFERED={env.get('PYTHONUNBUFFERED')}")
         logger.debug(f"Subprocess working directory: {os.getcwd()}")
         self.proc = subprocess.Popen(
             self.cmd,
@@ -494,13 +471,9 @@ class _WorkerProc:
 
         if require_x86_64:
             if str(info.get("machine", "")).lower() != "x86_64":
-                logger.error(
-                    f"Architecture mismatch: worker is {info.get('machine')}, but x86_64 required"
-                )
+                logger.error(f"Architecture mismatch: worker is {info.get('machine')}, but x86_64 required")
                 self._hard_kill()
-                raise Tempo2Error(
-                    f"worker arch is {info.get('machine')}, but x86_64 is required for quad precision"
-                )
+                raise Tempo2Error(f"worker arch is {info.get('machine')}, but x86_64 is required for quad precision")
 
         if not info.get("has_libstempo", False):
             logger.error("libstempo not available in worker environment")
@@ -533,9 +506,7 @@ class _WorkerProc:
             # With timeout
             end = time.time() + timeout
             while time.time() < end:
-                rlist, _, _ = select.select(
-                    [self.proc.stdout], [], [], max(0.01, end - time.time())
-                )
+                rlist, _, _ = select.select([self.proc.stdout], [], [], max(0.01, end - time.time()))
                 if rlist:
                     line = self.proc.stdout.readline()
                     if not line:  # EOF
@@ -552,15 +523,10 @@ class _WorkerProc:
                 logger.warning(f"Failed to terminate process: {e}")
                 pass
             t0 = time.time()
-            while (
-                self.proc.poll() is None
-                and (time.time() - t0) < self.policy.kill_grace_s
-            ):
+            while self.proc.poll() is None and (time.time() - t0) < self.policy.kill_grace_s:
                 time.sleep(0.01)
             if self.proc.poll() is None:
-                logger.warning(
-                    f"Sending SIGKILL to worker process (PID: {self.proc.pid})"
-                )
+                logger.warning(f"Sending SIGKILL to worker process (PID: {self.proc.pid})")
                 with contextlib.suppress(Exception):
                     os.kill(self.proc.pid, signal.SIGKILL)
         self.proc = None
@@ -584,9 +550,7 @@ class _WorkerProc:
 
     # ---------- JSON-RPC helpers ----------
 
-    def _send_rpc(
-        self, method: str, params: Dict[str, Any], timeout: Optional[float] = None
-    ) -> Any:
+    def _send_rpc(self, method: str, params: Dict[str, Any], timeout: Optional[float] = None) -> Any:
         if self.proc is None or self.proc.stdin is None or self.proc.stdout is None:
             logger.error("Worker not running, cannot send RPC")
             raise Tempo2Crashed("worker not running")
@@ -636,13 +600,9 @@ class _WorkerProc:
             raise Tempo2ProtocolError(f"malformed response: {resp_line!r}")
 
         if resp.get("id") != rid:
-            logger.error(
-                f"RPC {method} id mismatch: expected {rid}, got {resp.get('id')}"
-            )
+            logger.error(f"RPC {method} id mismatch: expected {rid}, got {resp.get('id')}")
             self._hard_kill()
-            raise Tempo2ProtocolError(
-                f"mismatched id in response: {resp.get('id')} vs {rid}"
-            )
+            raise Tempo2ProtocolError(f"mismatched id in response: {resp.get('id')} vs {rid}")
 
         if "error" in resp and resp["error"] is not None:
             err = resp["error"]
@@ -659,9 +619,7 @@ class _WorkerProc:
     def ctor(self, kwargs: Dict[str, Any], preload_residuals: bool):
         logger.info(f"Constructing tempopulsar with kwargs: {kwargs}")
         logger.info(f"Preload residuals: {preload_residuals}")
-        return self._send_rpc(
-            "ctor", {"kwargs": kwargs, "preload_residuals": preload_residuals}
-        )
+        return self._send_rpc("ctor", {"kwargs": kwargs, "preload_residuals": preload_residuals})
 
     def get(self, name: str):
         logger.debug(f"Getting attribute: {name}")
@@ -673,9 +631,7 @@ class _WorkerProc:
 
     def call(self, name: str, args=(), kwargs=None):
         logger.debug(f"Calling method: {name} with args={args}, kwargs={kwargs}")
-        return self._send_rpc(
-            "call", {"name": name, "args": tuple(args), "kwargs": dict(kwargs or {})}
-        )
+        return self._send_rpc("call", {"name": name, "args": tuple(args), "kwargs": dict(kwargs or {})})
 
     def rss(self) -> Optional[int]:
         try:
@@ -767,9 +723,7 @@ def _resolve_worker_cmd(env_name: Optional[str]) -> Tuple[List[str], bool]:
     # Base invocation that runs this file in worker mode:
     # Find the src directory dynamically
     current_file = Path(__file__).resolve()
-    src_dir = (
-        current_file.parent.parent
-    )  # Go up from libstempo/sandbox.py to src/
+    src_dir = current_file.parent.parent  # Go up from libstempo/sandbox.py to src/
     src_path = str(src_dir)
 
     def python_to_worker_cmd(python_exe: str) -> List[str]:
@@ -836,8 +790,7 @@ def _resolve_worker_cmd(env_name: Optional[str]) -> Tuple[List[str], bool]:
         return (arch + python_to_worker_cmd(py), require_x86_64)
 
     raise Tempo2Error(
-        f"Environment '{env_name}' not found. "
-        "Use a conda env name, a venv name, 'arch', or 'python:/abs/python'."
+        f"Environment '{env_name}' not found. " "Use a conda env name, a venv name, 'arch', or 'python:/abs/python'."
     )
 
 
@@ -896,30 +849,22 @@ class tempopulsar:
         self._state = _State(created_at=time.time(), calls_ok=0)
         self._require_x86 = False
 
-        logger.info(
-            f"Creating tempopulsar with env_name='{env_name}', kwargs={self._ctor_kwargs}"
-        )
-        logger.info(
-            f"Using policy: ctor_retry={self._policy.ctor_retry}, ctor_backoff={self._policy.ctor_backoff}s"
-        )
+        logger.info(f"Creating tempopulsar with env_name='{env_name}', kwargs={self._ctor_kwargs}")
+        logger.info(f"Using policy: ctor_retry={self._policy.ctor_retry}, ctor_backoff={self._policy.ctor_backoff}s")
         self._construct_with_retries()
 
     # --------------- construction / reconstruction with retries --------------- #
 
     def _construct_with_retries(self):
-        logger.info(
-            f"Starting construction with {self._policy.ctor_retry + 1} total attempts"
-        )
-        
+        logger.info(f"Starting construction with {self._policy.ctor_retry + 1} total attempts")
+
         # Proactive TOA counting to avoid "Too many TOAs" errors
         if self._policy.auto_nobs_retry:
             self._proactive_nobs_setup()
-        
+
         last_exc: Optional[Exception] = None
         for attempt in range(1 + self._policy.ctor_retry):
-            logger.info(
-                f"Construction attempt {attempt + 1}/{self._policy.ctor_retry + 1}"
-            )
+            logger.info(f"Construction attempt {attempt + 1}/{self._policy.ctor_retry + 1}")
             try:
                 cmd, require_x86 = _resolve_worker_cmd(self._env_name)
                 self._require_x86 = require_x86
@@ -929,9 +874,7 @@ class tempopulsar:
                 self._wp = _WorkerProc(self._policy, cmd, require_x86_64=require_x86)
                 # ctor on the worker (libstempo.tempopulsar)
                 logger.info("Calling constructor on worker...")
-                self._wp.ctor(
-                    self._ctor_kwargs, preload_residuals=self._policy.preload_residuals
-                )
+                self._wp.ctor(self._ctor_kwargs, preload_residuals=self._policy.preload_residuals)
                 self._state.created_at = time.time()
                 self._state.calls_ok = 0
                 logger.info(f"Construction successful on attempt {attempt + 1}")
@@ -952,34 +895,36 @@ class tempopulsar:
                     logger.info(f"Waiting {self._policy.ctor_backoff}s before retry...")
                     time.sleep(self._policy.ctor_backoff)
         logger.error(f"All construction attempts failed. Last error: {last_exc}")
-        raise Tempo2ConstructorFailed(
-            f"tempopulsar ctor failed after retries: {last_exc}"
-        )
+        raise Tempo2ConstructorFailed(f"tempopulsar ctor failed after retries: {last_exc}")
 
     def _proactive_nobs_setup(self):
         """Proactively count TOAs and add nobs parameter if needed to avoid 'Too many TOAs' errors."""
         try:
-            timfile = self._ctor_kwargs.get('timfile')
+            timfile = self._ctor_kwargs.get("timfile")
             if not timfile:
                 logger.debug("No timfile specified, skipping proactive nobs setup")
                 return
-            
+
             timfile_path = Path(timfile)
             if not timfile_path.exists():
                 logger.warning(f"TIM file does not exist: {timfile_path}")
                 return
-            
+
             logger.info(f"Proactively counting TOAs in {timfile_path}")
             analyzer = TimFileAnalyzer()
             toa_count = analyzer.count_toas(timfile_path)
-            
+
             if toa_count > self._policy.nobs_threshold:
                 maxobs_with_margin = int(toa_count * self._policy.nobs_safety_margin)
-                self._ctor_kwargs['maxobs'] = maxobs_with_margin
-                logger.info(f"Proactively added maxobs={maxobs_with_margin} parameter (TOAs: {toa_count}, threshold: {self._policy.nobs_threshold}, margin: {self._policy.nobs_safety_margin})")
+                self._ctor_kwargs["maxobs"] = maxobs_with_margin
+                logger.info(
+                    f"Proactively added maxobs={maxobs_with_margin} parameter (TOAs: {toa_count}, threshold: {self._policy.nobs_threshold}, margin: {self._policy.nobs_safety_margin})"
+                )
             else:
-                logger.debug(f"TOA count {toa_count} below threshold {self._policy.nobs_threshold}, no maxobs parameter needed")
-                
+                logger.debug(
+                    f"TOA count {toa_count} below threshold {self._policy.nobs_threshold}, no maxobs parameter needed"
+                )
+
         except Exception as e:
             logger.warning(f"Proactive nobs setup failed: {e}")
             # Don't raise - this is just optimization, construction should still work
@@ -995,16 +940,11 @@ class tempopulsar:
 
         # Check age limit (if set)
         if self._policy.max_age_s is not None and age > self._policy.max_age_s:
-            logger.info(
-                f"Should recycle: worker age {age:.1f}s exceeds max_age_s {self._policy.max_age_s}"
-            )
+            logger.info(f"Should recycle: worker age {age:.1f}s exceeds max_age_s {self._policy.max_age_s}")
             return True
 
         # Check call limit (if set)
-        if (
-            self._policy.max_calls_per_worker is not None
-            and self._state.calls_ok >= self._policy.max_calls_per_worker
-        ):
+        if self._policy.max_calls_per_worker is not None and self._state.calls_ok >= self._policy.max_calls_per_worker:
             logger.info(
                 f"Should recycle: calls_ok {self._state.calls_ok} exceeds max_calls_per_worker {self._policy.max_calls_per_worker}"
             )
@@ -1014,14 +954,10 @@ class tempopulsar:
         if self._policy.rss_soft_limit_mb is not None:
             rss = self._wp.rss()
             if rss and rss > self._policy.rss_soft_limit_mb:
-                logger.info(
-                    f"Should recycle: RSS {rss}MB exceeds limit {self._policy.rss_soft_limit_mb}MB"
-                )
+                logger.info(f"Should recycle: RSS {rss}MB exceeds limit {self._policy.rss_soft_limit_mb}MB")
                 return True
 
-        logger.debug(
-            f"Worker still healthy: age={age:.1f}s, calls={self._state.calls_ok}"
-        )
+        logger.debug(f"Worker still healthy: age={age:.1f}s, calls={self._state.calls_ok}")
         return False
 
     def _recycle(self):
@@ -1050,9 +986,7 @@ class tempopulsar:
             elif call == "set":
                 out = self._wp.set(payload["name"], payload["value"])
             elif call == "call":
-                out = self._wp.call(
-                    payload["name"], payload.get("args", ()), payload.get("kwargs", {})
-                )
+                out = self._wp.call(payload["name"], payload.get("args", ()), payload.get("kwargs", {}))
             else:
                 raise Tempo2ProtocolError(f"unknown call {call}")
             self._state.calls_ok += 1
@@ -1069,33 +1003,29 @@ class tempopulsar:
             elif call == "set":
                 out = self._wp.set(payload["name"], payload["value"])
             else:
-                out = self._wp.call(
-                    payload["name"], payload.get("args", ()), payload.get("kwargs", {})
-                )
+                out = self._wp.call(payload["name"], payload.get("args", ()), payload.get("kwargs", {}))
             self._state.calls_ok += 1
-            logger.info(
-                f"RPC {call} succeeded after recycle, total calls: {self._state.calls_ok}"
-            )
+            logger.info(f"RPC {call} succeeded after recycle, total calls: {self._state.calls_ok}")
             return out
 
     # ------------------------ Attribute proxying magic ------------------------ #
 
     def __getattr__(self, name: str):
         # Filter out IPython-specific attributes to prevent infinite loops
-        if name.startswith('_ipython_') or name in {
-            '_ipython_canary_method_should_not_exist_',
-            '_repr_mimebundle_',
-            '_repr_html_',
-            '_repr_json_',
-            '_repr_latex_',
-            '_repr_png_',
-            '_repr_jpeg_',
-            '_repr_svg_',
-            '_repr_pdf_',
+        if name.startswith("_ipython_") or name in {
+            "_ipython_canary_method_should_not_exist_",
+            "_repr_mimebundle_",
+            "_repr_html_",
+            "_repr_json_",
+            "_repr_latex_",
+            "_repr_png_",
+            "_repr_jpeg_",
+            "_repr_svg_",
+            "_repr_pdf_",
         }:
             logger.debug(f"Filtering out IPython attribute: {name}")
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-        
+
         def _remote_method(*args, **kwargs):
             return self._rpc("call", name=name, args=args, kwargs=kwargs)
 
@@ -1160,12 +1090,8 @@ def load_many(
     failed_list:     [LoadReport,...]
     """
     pol = policy if isinstance(policy, Policy) else Policy()
-    logger.info(
-        f"Starting bulk load of {len(list(pairs))} pulsars with {parallel} parallel workers"
-    )
-    logger.info(
-        f"Using policy: ctor_retry={pol.ctor_retry}, ctor_backoff={pol.ctor_backoff}s"
-    )
+    logger.info(f"Starting bulk load of {len(list(pairs))} pulsars with {parallel} parallel workers")
+    logger.info(f"Using policy: ctor_retry={pol.ctor_retry}, ctor_backoff={pol.ctor_backoff}s")
 
     def _one(par, tim):
         """Load a single pulsar with retry logic for bulk loading."""
@@ -1208,18 +1134,14 @@ def load_many(
             else:
                 failed.append(report)
 
-    logger.info(
-        f"Bulk load completed: {len(ok)} successful, {len(retried)} retried, {len(failed)} failed"
-    )
+    logger.info(f"Bulk load completed: {len(ok)} successful, {len(retried)} retried, {len(failed)} failed")
     return ok, retried, failed
 
 
 # ------------------------------- Quick helpers ------------------------------ #
 
 
-def configure_logging(
-    level: str = "INFO", log_file: Optional[str] = None, enable_console: bool = True
-):
+def configure_logging(level: str = "INFO", log_file: Optional[str] = None, enable_console: bool = True):
     """
     Configure standard logging for the sandbox.
 
@@ -1230,35 +1152,30 @@ def configure_logging(
     """
     # Get the sandbox logger
     sandbox_logger = logging.getLogger(__name__)
-    
+
     # Clear existing handlers
     sandbox_logger.handlers.clear()
-    
+
     # Set level
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     sandbox_logger.setLevel(numeric_level)
-    
+
     # Create formatter
-    formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | tempo2_sandbox | %(message)s',
-        datefmt='%H:%M:%S'
-    )
-    
+    formatter = logging.Formatter("%(asctime)s | %(levelname)-8s | tempo2_sandbox | %(message)s", datefmt="%H:%M:%S")
+
     # Add console handler if requested
     if enable_console:
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setFormatter(formatter)
         sandbox_logger.addHandler(console_handler)
-    
+
     # Add file handler if requested
     if log_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         sandbox_logger.addHandler(file_handler)
-    
-    logger.info(
-        f"Logging configured: level={level}, console={enable_console}, file={log_file}"
-    )
+
+    logger.info(f"Logging configured: level={level}, console={enable_console}, file={log_file}")
 
 
 def setup_instructions(env_name: str = "tempo2_intel"):
@@ -1280,9 +1197,7 @@ def setup_instructions(env_name: str = "tempo2_intel"):
     print(f'   # then just: psr = tempopulsar(..., env_name="{env_name}")')
     print("\n3. System Python with Rosetta:")
     print("   # Install Intel Python first (or use system one under arch).")
-    print(
-        '   # You can force Rosetta via TEMPO2_SANDBOX_WORKER_ARCH_PREFIX="arch -x86_64"'
-    )
+    print('   # You can force Rosetta via TEMPO2_SANDBOX_WORKER_ARCH_PREFIX="arch -x86_64"')
     print('   # then: psr = tempopulsar(..., env_name="arch")')
 
 
@@ -1307,9 +1222,7 @@ def detect_and_guide(env_name: str):
     elif et == "python":
         print("✅ Using explicit Python path.")
     else:
-        print(
-            "❌ Not found. Use conda env name, venv name, 'arch', or 'python:/abs/python'."
-        )
+        print("❌ Not found. Use conda env name, venv name, 'arch', or 'python:/abs/python'.")
 
 
 # ------------------------------ Module runner ------------------------------- #

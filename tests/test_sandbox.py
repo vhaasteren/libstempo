@@ -20,9 +20,7 @@ class TestSandbox(unittest.TestCase):
     def test_policy_configuration(self):
         """Test Policy configuration"""
         policy = Policy(ctor_retry=2, call_timeout_s=30.0)
-        psr = tempopulsar(
-            parfile=self.parfile, timfile=self.timfile, policy=policy
-        )
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile, policy=policy)
         self.assertEqual(psr.name, "1909-3744")
 
     def test_designmatrix_call(self):
@@ -75,16 +73,16 @@ class TestTimFileAnalyzer(unittest.TestCase):
     def test_cache_functionality(self):
         """Test that caching works correctly"""
         analyzer = TimFileAnalyzer()
-        
+
         # First call
         timespan1, count1 = analyzer.get_timespan_and_count(self.timfile)
-        
+
         # Second call should use cache
         timespan2, count2 = analyzer.get_timespan_and_count(self.timfile)
-        
+
         self.assertEqual(timespan1, timespan2)
         self.assertEqual(count1, count2)
-        
+
         # Clear cache and test again
         analyzer.clear_cache()
         timespan3, count3 = analyzer.get_timespan_and_count(self.timfile)
