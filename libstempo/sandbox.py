@@ -1,5 +1,7 @@
-# sandbox.py
 """
+Author: Rutger van Haasteren -- rutger@vhaasteren.com
+Date:   2025-10-10
+
 Process sandbox for libstempo/tempo2 that keeps each pulsar in its own clean
 subprocess. A segfault in tempo2/libstempo only kills the worker, not your kernel.
 
