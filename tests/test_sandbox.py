@@ -46,7 +46,7 @@ class TestSandbox(unittest.TestCase):
         configure_logging(level="INFO", enable_console=True)
 
     def test_logs_readout(self):
-        """Test that logs() captures tempo2 stdout/stderr by invoking savepar(), which prints."""
+        """Test that logs() captures tempo2 output via savepar()."""
         psr = tempopulsar(parfile=self.parfile, timfile=self.timfile, dofit=False)
         # Baseline logs
         logs_before = psr.logs(2000)
@@ -57,6 +57,7 @@ class TestSandbox(unittest.TestCase):
         _ = psr.savepar(tmp_par.name)
         # Give background drain thread a moment to process
         import time as _t
+
         _t.sleep(0.1)
         logs_after = psr.logs(8000)
         self.assertIsInstance(logs_after, str)

@@ -1,3 +1,4 @@
+# flake8: noqa: E501
 """
 Author: Rutger van Haasteren -- rutger@vhaasteren.com
 Date:   2025-10-10
@@ -204,6 +205,7 @@ def _worker_stdio_main() -> None:
     # Permanently redirect C-level stdout (FD 1) to stderr (FD 2),
     # while keeping JSON-RPC on a dedicated duplicate of the original stdout pipe.
     import os as _os_for_fds
+
     _proto_fd = _os_for_fds.dup(1)  # save original stdout FD for protocol
     _os_for_fds.dup2(2, 1)  # route any C/printf stdout to stderr
     sys.stdout = _os_for_fds.fdopen(_proto_fd, "w", buffering=1)
@@ -311,7 +313,7 @@ def _worker_stdio_main() -> None:
                 if _lib_tempopulsar is None:
                     raise ImportError("libstempo not available in worker")
 
-                obj = _lib_tempopulsar(**params["kwargs"]) 
+                obj = _lib_tempopulsar(**params["kwargs"])
                 if params.get("preload_residuals", True):
                     _ = obj.residuals(updatebats=True, formresiduals=True)
 
@@ -433,13 +435,15 @@ class _WorkerProc:
         logger.debug(f"Worker process started with PID: {self.proc.pid}")
 
         # Start background stderr drain to avoid backpressure and capture logs
-        import threading, collections
+        import threading
+        import collections
+
         self._log_buf = collections.deque(maxlen=20000)
 
         def _drain_stderr(pipe, sink_deque):
             try:
-                for line in iter(pipe.readline, ''):
-                    line = line.rstrip('\n')
+                for line in iter(pipe.readline, ""):
+                    line = line.rstrip("\n")
                     sink_deque.append(line)
                     logger.debug("[tempo2-stderr] %s", line)
             finally:
@@ -649,7 +653,7 @@ class _WorkerProc:
 
     def logs(self, tail: int = 500) -> str:
         try:
-            return "\n".join(list(self._log_buf)[-max(0, tail):])
+            return "\n".join(list(self._log_buf)[-max(0, tail) :])
         except Exception:
             return ""
 
