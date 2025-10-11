@@ -201,6 +201,13 @@ def _worker_stdio_main() -> None:
          Each request's 'params_b64' is a pickled dict of parameters.
          Each response uses 'result_b64' for Python results, or 'error'.
     """
+    # Permanently redirect C-level stdout (FD 1) to stderr (FD 2),
+    # while keeping JSON-RPC on a dedicated duplicate of the original stdout pipe.
+    import os as _os_for_fds
+    _proto_fd = _os_for_fds.dup(1)  # save original stdout FD for protocol
+    _os_for_fds.dup2(2, 1)  # route any C/printf stdout to stderr
+    sys.stdout = _os_for_fds.fdopen(_proto_fd, "w", buffering=1)
+
     # Step 1: hello handshake
     hello = {
         "hello": {
@@ -304,32 +311,9 @@ def _worker_stdio_main() -> None:
                 if _lib_tempopulsar is None:
                     raise ImportError("libstempo not available in worker")
 
-                # Suppress stdout/stderr during constructor to prevent libstempo debug output
-                # from contaminating the JSON-RPC protocol. We need to redirect at the OS level
-                # because tempo2 writes directly to file descriptors.
-                import os
-
-                # Save original stdout/stderr file descriptors
-                original_stdout = os.dup(1)
-                original_stderr = os.dup(2)
-
-                try:
-                    # Redirect stdout/stderr to /dev/null
-                    devnull = os.open(os.devnull, os.O_WRONLY)
-                    os.dup2(devnull, 1)  # stdout
-                    os.dup2(devnull, 2)  # stderr
-
-                    obj = _lib_tempopulsar(**params["kwargs"])
-                    if params.get("preload_residuals", True):
-                        _ = obj.residuals(updatebats=True, formresiduals=True)
-
-                finally:
-                    # Restore original stdout/stderr
-                    os.dup2(original_stdout, 1)
-                    os.dup2(original_stderr, 2)
-                    os.close(devnull)
-                    os.close(original_stdout)
-                    os.close(original_stderr)
+                obj = _lib_tempopulsar(**params["kwargs"]) 
+                if params.get("preload_residuals", True):
+                    _ = obj.residuals(updatebats=True, formresiduals=True)
 
                 _write_response(
                     {
@@ -447,6 +431,26 @@ class _WorkerProc:
         )
 
         logger.debug(f"Worker process started with PID: {self.proc.pid}")
+
+        # Start background stderr drain to avoid backpressure and capture logs
+        import threading, collections
+        self._log_buf = collections.deque(maxlen=20000)
+
+        def _drain_stderr(pipe, sink_deque):
+            try:
+                for line in iter(pipe.readline, ''):
+                    line = line.rstrip('\n')
+                    sink_deque.append(line)
+                    logger.debug("[tempo2-stderr] %s", line)
+            finally:
+                with contextlib.suppress(Exception):
+                    pipe.close()
+
+        if self.proc.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=_drain_stderr, args=(self.proc.stderr, self._log_buf), daemon=True
+            )
+            self._stderr_thread.start()
 
         # Hello handshake (one line of JSON)
         logger.debug("Waiting for worker hello handshake...")
@@ -642,6 +646,12 @@ class _WorkerProc:
         except Exception as e:
             logger.warning(f"Failed to get RSS: {e}")
             return None
+
+    def logs(self, tail: int = 500) -> str:
+        try:
+            return "\n".join(list(self._log_buf)[-max(0, tail):])
+        except Exception:
+            return ""
 
 
 # ------------------------- Command resolution (env_name) -------------------- #
@@ -1061,6 +1071,9 @@ class tempopulsar:
 
     def fit(self, **kwargs):
         return self._rpc("call", name="fit", kwargs=kwargs)
+
+    def logs(self, tail: int = 500) -> str:
+        return self._wp.logs(tail) if self._wp else ""
 
     def __del__(self):
         with contextlib.suppress(Exception):
