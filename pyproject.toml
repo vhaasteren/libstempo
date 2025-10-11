@@ -25,8 +25,7 @@ description = "A Python wrapper for tempo2"
 authors = [{name = "Michele Vallisneri", email = "vallis@vallis.org"}]
 urls = { Homepage = "https://github.com/vallis/libstempo" }
 readme = "README.md"
-license = {text = "MIT"}
-license-files = [ "LICENSE" ] 
+license = {file = "LICENSE"} 
 classifiers=[
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
