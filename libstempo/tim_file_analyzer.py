@@ -122,37 +122,41 @@ OBSERVATORY_NAMES = {
 
 def _toa_format(line: str, fmt: str = "Unknown") -> str:
     """Determine the type of a TOA line.
-    
+
     Identifies a TOA line as one of the following types:
     Comment, Command, Blank, Tempo2, Princeton, ITOA, Parkes, Unknown.
-    
+
     This replicates PINT's _toa_format function.
     """
     # Check for comments first
     if (
-        line.startswith("C ") and len(line) > 2 and not line[2].isdigit()  # C followed by non-digit
-        or line.startswith("c ") and len(line) > 2 and not line[2].isdigit()  # c followed by non-digit
+        line.startswith("C ")
+        and len(line) > 2
+        and not line[2].isdigit()  # C followed by non-digit
+        or line.startswith("c ")
+        and len(line) > 2
+        and not line[2].isdigit()  # c followed by non-digit
         or line.startswith("#")
         or line.startswith("CC ")
     ):
         return "Comment"
-    
+
     # Check for commands
     if line.upper().lstrip().startswith(TOA_COMMANDS):
         return "Command"
-    
+
     # Check for blank lines
     if re.match(r"^\s*$", line):
         return "Blank"
-    
+
     # Check for Princeton format: starts with single observatory code followed by space
     if re.match(r"[0-9a-zA-Z@] ", line):
         return "Princeton"
-    
+
     # Check for Tempo2 format: long lines, explicitly marked as Tempo2, or structured like Tempo2
     if len(line) > 80 or fmt == "Tempo2":
         return "Tempo2"
-    
+
     # Additional Tempo2 detection: if it looks like a Tempo2 TOA line (has 5+ space-separated fields)
     fields = line.split()
     if len(fields) >= 5:
@@ -160,34 +164,34 @@ def _toa_format(line: str, fmt: str = "Unknown") -> str:
         try:
             # Try to parse as Tempo2: name freq mjd error obs
             float(fields[1])  # frequency should be numeric
-            float(fields[2])  # MJD should be numeric  
+            float(fields[2])  # MJD should be numeric
             float(fields[3])  # error should be numeric
             # If we get here, it looks like Tempo2 format
             return "Tempo2"
         except (ValueError, IndexError):
             pass
-    
+
     # Check for Parkes format: starts with space, has decimal at position 42
     if re.match(r"^ ", line) and len(line) > 41 and line[41] == ".":
         return "Parkes"
-    
+
     # Check for ITOA format: two non-space chars, decimal at position 15
     if re.match(r"\S\S", line) and len(line) > 14 and line[14] == ".":
         return "ITOA"
-    
+
     # Default to Unknown
     return "Unknown"
 
 
 def _get_observatory_name(obs_code: str) -> str:
     """Get observatory name from observatory code.
-    
+
     This is a simplified version of PINT's get_observatory function
     that only handles the most common observatory codes.
-    
+
     Args:
         obs_code: Observatory code (e.g., 'A', 'AO', '@')
-        
+
     Returns:
         Observatory name
     """
@@ -197,17 +201,17 @@ def _get_observatory_name(obs_code: str) -> str:
 
 def _parse_TOA_line(line: str, fmt: str = "Unknown") -> Tuple[Optional[Tuple[int, float]], dict]:
     """Parse a one-line ASCII time-of-arrival.
-    
+
     Return an MJD tuple and a dictionary of other TOA information.
     The format can be one of: Comment, Command, Blank, Tempo2,
     Princeton, ITOA, Parkes, or Unknown.
-    
+
     This replicates PINT's _parse_TOA_line function.
     """
     MJD = None
     fmt = _toa_format(line, fmt)
     d = dict(format=fmt)
-    
+
     if fmt == "Princeton":
         # Princeton format
         # ----------------
@@ -259,7 +263,7 @@ def _parse_TOA_line(line: str, fmt: str = "Unknown") -> Tuple[Optional[Tuple[int
             # If parsing fails, treat as unknown format
             logger.debug(f"Failed to parse Princeton format line: {e}")
             d["format"] = "Unknown"
-            
+
     elif fmt == "Tempo2":
         # This could use more error catching...
         try:
@@ -275,14 +279,14 @@ def _parse_TOA_line(line: str, fmt: str = "Unknown") -> Tuple[Optional[Tuple[int
             d["obs"] = _get_observatory_name(fields[4].upper())
             # All the rest should be flags
             flags = fields[5:]
-            
+
             # Flags and flag-values should be given in pairs.
             # The for loop below will fail otherwise.
             if len(flags) % 2 != 0:
                 raise ValueError(
                     f"Flags and flag-values should be given in pairs. The given flags are {' '.join(flags)}"
                 )
-            
+
             for i in range(0, len(flags), 2):
                 k, v = flags[i].lstrip("-"), flags[i + 1]
                 if k in ["error", "freq", "scale", "MJD", "flags", "obs", "name"]:
@@ -294,7 +298,7 @@ def _parse_TOA_line(line: str, fmt: str = "Unknown") -> Tuple[Optional[Tuple[int
             # If parsing fails, treat as unknown format
             logger.debug(f"Failed to parse Tempo2 format line: {e}")
             d["format"] = "Unknown"
-            
+
     elif fmt == "Command":
         d[fmt] = line.split()
     elif fmt == "Parkes":
@@ -315,22 +319,18 @@ def _parse_TOA_line(line: str, fmt: str = "Unknown") -> Tuple[Optional[Tuple[int
             MJD = int(ii), float(f"0.{ff}")
             phaseoffset = float(line[55:62])
             if phaseoffset != 0:
-                raise ValueError(
-                    f"Cannot interpret Parkes format with phaseoffset={phaseoffset} yet"
-                )
+                raise ValueError(f"Cannot interpret Parkes format with phaseoffset={phaseoffset} yet")
             d["error"] = float(line[63:71])
             d["obs"] = _get_observatory_name(line[79].upper())
         except (ValueError, IndexError) as e:
             # If parsing fails, treat as unknown format
             logger.debug(f"Failed to parse Parkes format line: {e}")
             d["format"] = "Unknown"
-            
+
     elif fmt == "ITOA":
         raise RuntimeError(f"TOA format '{fmt}' not implemented yet")
     elif fmt not in ["Blank", "Comment"]:
-        raise RuntimeError(
-            f"Unable to identify TOA format for line {line!r}, expecting {fmt}"
-        )
+        raise RuntimeError(f"Unable to identify TOA format for line {line!r}, expecting {fmt}")
     return MJD, d
 
 
@@ -340,7 +340,7 @@ class TimFileAnalyzer:
     This class efficiently extracts TOA MJD values from TIM files using
     independent parsing logic that replicates PINT's functionality,
     providing both performance and robustness for timespan calculations.
-    
+
     The analyzer caches results per file to avoid duplicate parsing when both
     timespan and TOA count are needed for the same file.
     """
@@ -381,18 +381,14 @@ class TimFileAnalyzer:
             self._file_cache[tim_file_path] = (timespan, toa_count)
 
             if toa_count > 0:
-                self.logger.debug(
-                    f"Cached data for {tim_file_path}: {timespan:.1f} days, {toa_count} TOAs"
-                )
+                self.logger.debug(f"Cached data for {tim_file_path}: {timespan:.1f} days, {toa_count} TOAs")
             else:
                 self.logger.debug(f"Cached data for {tim_file_path}: No TOAs found")
             return timespan, toa_count
 
         except Exception as e:
             self.logger.warning(f"Parsing failed for {tim_file_path}: {e}")
-            self.logger.debug(
-                "File may contain non-standard TIM format or malformed data"
-            )
+            self.logger.debug("File may contain non-standard TIM format or malformed data")
             # Cache empty result to avoid repeated failures
             empty_result = (0.0, 0)
             self._file_cache[tim_file_path] = empty_result
@@ -413,9 +409,7 @@ class TimFileAnalyzer:
             self.logger.warning(f"No TOAs found in {tim_file_path}")
             return 0.0
 
-        self.logger.debug(
-            f"Timespan for {tim_file_path}: {timespan:.1f} days ({toa_count} TOAs)"
-        )
+        self.logger.debug(f"Timespan for {tim_file_path}: {timespan:.1f} days ({toa_count} TOAs)")
         return timespan
 
     def count_toas(self, tim_file_path: Path) -> int:
@@ -429,9 +423,7 @@ class TimFileAnalyzer:
         """
         _, toa_count = self._get_timespan_and_count(tim_file_path)
 
-        self.logger.debug(
-            f"TOA count for {tim_file_path}: {toa_count} TOAs"
-        )
+        self.logger.debug(f"TOA count for {tim_file_path}: {toa_count} TOAs")
         return toa_count
 
     def clear_cache(self) -> None:
@@ -454,9 +446,7 @@ class TimFileAnalyzer:
             self.logger.warning(f"No TOAs found in {tim_file_path}")
             return 0.0, 0
 
-        self.logger.debug(
-            f"Timespan and count for {tim_file_path}: {timespan:.1f} days, {toa_count} TOAs"
-        )
+        self.logger.debug(f"Timespan and count for {tim_file_path}: {timespan:.1f} days, {toa_count} TOAs")
         return timespan, toa_count
 
     def _extract_mjd_values_recursive(self, tim_file_path: Path) -> List[float]:
@@ -491,9 +481,7 @@ class TimFileAnalyzer:
                         mjd_tuple, d = _parse_TOA_line(line)
                     except Exception as e:
                         # Parsing may fail on malformed lines - skip them gracefully
-                        self.logger.debug(
-                            f"Skipping malformed line in {tim_file_path}: {line.strip()} - {e}"
-                        )
+                        self.logger.debug(f"Skipping malformed line in {tim_file_path}: {line.strip()} - {e}")
                         continue
 
                     # Handle commands (especially INCLUDE)
@@ -516,9 +504,7 @@ class TimFileAnalyzer:
 
         return mjd_values
 
-    def _handle_command(
-        self, d: dict, current_file: Path, mjd_values: List[float]
-    ) -> None:
+    def _handle_command(self, d: dict, current_file: Path, mjd_values: List[float]) -> None:
         """Handle TIM file commands using parsed command data.
 
         Args:

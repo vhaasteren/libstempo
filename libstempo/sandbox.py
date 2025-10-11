@@ -920,7 +920,9 @@ class tempopulsar:
                 maxobs_with_margin = int(toa_count * self._policy.nobs_safety_margin)
                 self._ctor_kwargs["maxobs"] = maxobs_with_margin
                 logger.info(
-                    f"Proactively added maxobs={maxobs_with_margin} parameter (TOAs: {toa_count}, threshold: {self._policy.nobs_threshold}, margin: {self._policy.nobs_safety_margin})"
+                    f"Proactively added maxobs={maxobs_with_margin} parameter "
+                    f"(TOAs: {toa_count}, threshold: {self._policy.nobs_threshold}, "
+                    f"margin: {self._policy.nobs_safety_margin})"
                 )
             else:
                 logger.debug(
@@ -948,7 +950,8 @@ class tempopulsar:
         # Check call limit (if set)
         if self._policy.max_calls_per_worker is not None and self._state.calls_ok >= self._policy.max_calls_per_worker:
             logger.info(
-                f"Should recycle: calls_ok {self._state.calls_ok} exceeds max_calls_per_worker {self._policy.max_calls_per_worker}"
+                f"Should recycle: calls_ok {self._state.calls_ok} exceeds "
+                f"max_calls_per_worker {self._policy.max_calls_per_worker}"
             )
             return True
 
