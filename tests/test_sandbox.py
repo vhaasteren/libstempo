@@ -180,6 +180,198 @@ class TestSandbox(unittest.TestCase):
         assert_allclose(res_s, res_n, rtol=0, atol=0)
 
 
+class TestStateManagement(unittest.TestCase):
+    """Tests for state management and crash recovery."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = t2.__path__[0] + "/data/"
+        cls.parfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.par"
+        cls.timfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.tim"
+
+    def test_param_state_capture(self):
+        """Test that parameter modifications are captured in state cache."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Modify parameters
+        original_raj = psr["RAJ"].val
+        psr["RAJ"].val = original_raj + 0.001
+        psr["DM"].fit = False
+
+        # Check state cache
+        self.assertIn("RAJ", psr._state.param_cache)
+        self.assertIn("val", psr._state.param_cache["RAJ"])
+        self.assertEqual(psr._state.param_cache["RAJ"]["val"], original_raj + 0.001)
+        self.assertEqual(psr._state.param_cache["DM"]["fit"], False)
+
+    def test_array_state_capture(self):
+        """Test that array modifications are captured in state cache."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Modify arrays
+        original_stoas = psr.stoas.copy()
+        psr.stoas[:] = original_stoas + 1e-6
+
+        # Check state cache
+        self.assertIn("stoas", psr._state.array_cache)
+        expected_stoas = original_stoas + 1e-6
+        np.testing.assert_allclose(psr._state.array_cache["stoas"], expected_stoas)
+
+    def test_state_restoration_after_recycle(self):
+        """Test that state is restored after worker recycle."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Modify state
+        psr["RAJ"].val = 5.020
+        psr["DM"].fit = True
+        original_stoas = psr.stoas.copy()
+        psr.stoas[:] = original_stoas + 2e-6
+
+        # Force recycle
+        psr._recycle()
+
+        # Verify restoration
+        self.assertAlmostEqual(psr["RAJ"].val, 5.020, places=6)
+        self.assertTrue(psr["DM"].fit)
+        np.testing.assert_allclose(psr.stoas, original_stoas + 2e-6, rtol=1e-10)
+
+    def test_crash_statistics_tracking(self):
+        """Test crash statistics tracking."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Initial stats
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 0)
+        self.assertIsNone(stats["last_crash_at"])
+
+        # Record crash manually
+        psr._record_crash()
+
+        # Check stats
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 1)
+        self.assertIsNotNone(stats["last_crash_at"])
+
+        # Record another crash
+        psr._record_crash()
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 2)
+
+    def test_crash_stats_after_recycle(self):
+        """Test crash statistics after recycle."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Record crash and recycle
+        psr._record_crash()
+        psr._recycle()
+
+        # Check stats
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 1)
+        self.assertIsNotNone(stats["last_crash_at"])
+        self.assertGreater(stats["worker_age_s"], 0)
+
+    def test_complete_crash_recovery_workflow(self):
+        """Test complete workflow: modify -> crash -> recover -> verify."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Step 1: Modify state
+        original_raj = psr["RAJ"].val
+        original_dm_fit = psr["DM"].fit
+        original_stoas = psr.stoas.copy()
+
+        psr["RAJ"].val = original_raj + 0.005
+        psr["DM"].fit = not original_dm_fit
+        psr.stoas[:] = original_stoas + 5e-6
+
+        # Step 2: Simulate crash and recovery
+        psr._record_crash()
+        psr._recycle()
+
+        # Step 3: Verify state restoration
+        self.assertAlmostEqual(psr["RAJ"].val, original_raj + 0.005, places=6)
+        self.assertEqual(psr["DM"].fit, not original_dm_fit)
+        np.testing.assert_allclose(psr.stoas, original_stoas + 5e-6, rtol=1e-10)
+
+        # Step 4: Verify crash stats
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 1)
+        self.assertIsNotNone(stats["last_crash_at"])
+
+    def test_state_preservation_across_multiple_crashes(self):
+        """Test state preservation across multiple crashes."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Initial modifications
+        psr["RAJ"].val = 5.025
+        psr["DM"].fit = False
+
+        # Multiple crashes and recoveries
+        for i in range(3):
+            psr._record_crash()
+            psr._recycle()
+
+            # Verify state preserved
+            self.assertAlmostEqual(psr["RAJ"].val, 5.025, places=6)
+            self.assertFalse(psr["DM"].fit)
+
+        # Check final crash count
+        stats = psr.get_crash_stats()
+        self.assertEqual(stats["crash_count"], 3)
+
+    def test_state_restoration_with_invalid_parameters(self):
+        """Test state restoration when some parameters are invalid."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Modify valid parameter
+        psr["RAJ"].val = 5.030
+
+        # Add invalid parameter to cache (simulate edge case)
+        psr._state.param_cache["INVALID_PARAM"] = {"val": 999.0}
+
+        # Recycle and verify valid parameter restored
+        psr._recycle()
+        self.assertAlmostEqual(psr["RAJ"].val, 5.030, places=6)
+
+    def test_empty_state_cache_restoration(self):
+        """Test restoration when state cache is empty."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Ensure empty cache
+        psr._state.param_cache.clear()
+        psr._state.array_cache.clear()
+
+        # Recycle should not fail
+        psr._recycle()
+
+        # Basic functionality should still work
+        self.assertEqual(psr.name, "1909-3744")
+
+    def test_state_capture_performance(self):
+        """Test that state capture doesn't significantly impact performance."""
+        import time
+
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Time parameter modifications
+        start = time.time()
+        for i in range(100):
+            psr["RAJ"].val = 5.0 + i * 0.001
+        param_time = time.time() - start
+
+        # Time array modifications
+        start = time.time()
+        for i in range(10):
+            # Get the array, modify it, and set it back
+            current_stoas = psr.stoas.copy()
+            psr.stoas[:] = current_stoas + i * 1e-6
+        array_time = time.time() - start
+
+        # Should be reasonable (adjust thresholds as needed)
+        self.assertLess(param_time, 5.0)  # 100 param changes in < 5 seconds
+        self.assertLess(array_time, 10.0)  # 10 array changes in < 10 seconds
+
+
 class TestTimFileAnalyzer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

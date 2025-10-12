@@ -606,10 +606,10 @@ class _WorkerProc:
                 for line in iter(pipe.readline, ""):
                     line = line.rstrip("\n")
                     sink_deque.append(line)
-                    
+
                     # Write to real stderr for real-time output (native-like behavior)
                     print(line, file=sys.stderr, flush=True)
-                    
+
                     if sink_file:
                         try:
                             sink_file.write(line + "\n")
@@ -1048,6 +1048,16 @@ class _State:
 
     created_at: float
     calls_ok: int
+    # State cache for crash recovery
+    param_cache: Dict[str, Dict[str, Any]] = dataclasses.field(
+        default_factory=dict
+    )  # {'RAJ': {'val': 5.016, 'fit': True}, ...}
+    array_cache: Dict[str, Any] = dataclasses.field(
+        default_factory=dict
+    )  # {'stoas': modified_array, 'toaerrs': modified_array}
+    # Crash recovery statistics
+    crash_count: int = 0
+    last_crash_at: Optional[float] = None
 
 
 class tempopulsar:
@@ -1143,10 +1153,18 @@ class tempopulsar:
                 self._state.created_at = time.time()
                 self._state.calls_ok = 0
                 logger.info(f"Construction successful on attempt {attempt + 1}")
+
+                # Restore state after successful reconstruction
+                self._restore_state_after_reconstruction()
                 return
             except Exception as e:
                 logger.warning(f"Construction attempt {attempt + 1} failed: {e}")
                 last_exc = e
+
+                # Record crash if this is a retry (not the first attempt)
+                if attempt > 0:
+                    self._record_crash()
+
                 # If it's a file-not-found style error, fail fast without retries
                 msg = str(e)
                 if any(
@@ -1203,6 +1221,62 @@ class tempopulsar:
         except Exception as e:
             logger.warning(f"Proactive nobs setup failed: {e}")
             # Don't raise - this is just optimization, construction should still work
+
+    # ----------------------------- state management ----------------------------- #
+
+    def _capture_param_state(self, param_name: str, field: str, value: Any) -> None:
+        """Capture parameter state for crash recovery."""
+        if param_name not in self._state.param_cache:
+            self._state.param_cache[param_name] = {}
+        self._state.param_cache[param_name][field] = value
+        logger.debug(f"Captured param state: {param_name}.{field} = {value}")
+
+    def _capture_array_state(self, array_name: str, value: Any) -> None:
+        """Capture array state for crash recovery."""
+        self._state.array_cache[array_name] = value
+        logger.debug(f"Captured array state: {array_name}")
+
+    def _restore_state_after_reconstruction(self) -> None:
+        """Restore parameter values, fit flags, and array modifications after worker reconstruction."""
+        if not self._state.param_cache and not self._state.array_cache:
+            logger.debug("No state to restore")
+            return
+
+        logger.info(f"Restoring state: {len(self._state.param_cache)} params, {len(self._state.array_cache)} arrays")
+
+        # Restore parameter values and fit flags
+        for param_name, param_state in self._state.param_cache.items():
+            for field, value in param_state.items():
+                try:
+                    self._wp.set(f"{param_name}.{field}", value)
+                    logger.debug(f"Restored param: {param_name}.{field} = {value}")
+                except Exception as e:
+                    logger.warning(f"Failed to restore param {param_name}.{field}: {e}")
+
+        # Restore array modifications
+        for array_name, array_data in self._state.array_cache.items():
+            try:
+                self._wp.setitem(array_name, slice(None), array_data)
+                logger.debug(f"Restored array: {array_name}")
+            except Exception as e:
+                logger.warning(f"Failed to restore array {array_name}: {e}")
+
+        logger.info("State restoration completed")
+
+    def _record_crash(self) -> None:
+        """Record crash statistics."""
+        self._state.crash_count += 1
+        self._state.last_crash_at = time.time()
+        logger.info(f"Worker crash recorded (total crashes: {self._state.crash_count})")
+
+    def get_crash_stats(self) -> Dict[str, Any]:
+        """Get crash recovery statistics."""
+        return {
+            "crash_count": self._state.crash_count,
+            "last_crash_at": self._state.last_crash_at,
+            "worker_age_s": time.time() - self._state.created_at if self._wp else None,
+            "calls_since_creation": self._state.calls_ok,
+        }
 
     # ----------------------------- recycling policy --------------------------- #
 
@@ -1275,7 +1349,8 @@ class tempopulsar:
             if call != "get" or not str(e).startswith("AttributeError"):
                 logger.warning(f"RPC {call} failed with {type(e).__name__}: {e}")
                 logger.info("Attempting automatic worker recycle and retry")
-            # automatic one-time recycle on a fresh worker
+            # Record crash and recycle
+            self._record_crash()
             self._recycle()
             assert self._wp is not None
             if call == "get":
@@ -1323,6 +1398,10 @@ class tempopulsar:
     def __setattr__(self, name: str, value: Any):
         if name in tempopulsar.__slots__:
             return object.__setattr__(self, name, value)
+
+        # Capture state for crash recovery
+        self._capture_array_state(name, value)
+
         _ = self._rpc("set", name=name, value=value)
         return None
 
@@ -1420,6 +1499,10 @@ class _ParamProxy:
     def __setattr__(self, attr: str, value: Any) -> None:
         if attr in _ParamProxy.__slots__:
             return object.__setattr__(self, attr, value)
+
+        # Capture parameter state for crash recovery
+        self._parent._capture_param_state(self._name, attr, value)
+
         _ = self._parent._rpc("set", name=f"{self._name}.{attr}", value=value)
         return None
 
@@ -1452,7 +1535,7 @@ class _ArrayProxy:
             arr = []
         else:
             arr = []
-        
+
         a = _np.asarray(arr)
         if dtype is not None:
             a = a.astype(dtype, copy=False)
@@ -1475,6 +1558,23 @@ class _ArrayProxy:
         return self._parent._wp.get_slice(self._name, idx)
 
     def __setitem__(self, idx, value):
+        # Capture array state for crash recovery
+        # For full array replacement (slice(None)), capture the entire array
+        if idx == slice(None):
+            self._parent._capture_array_state(self._name, value)
+        else:
+            # For partial updates, we need to get the current array and apply the change
+            # This is more complex, so for now we'll capture the full array after the change
+            try:
+                current_array = self.__array__()
+                if hasattr(current_array, "copy"):
+                    new_array = current_array.copy()
+                    new_array[idx] = value
+                    self._parent._capture_array_state(self._name, new_array)
+            except Exception:
+                # If we can't capture the state, continue anyway
+                pass
+
         _ = self._parent._rpc("setitem", name=self._name, index=idx, value=value)
         return None
 
