@@ -653,10 +653,6 @@ class _WorkerProc:
         info = hello_obj.get("hello", {})
         logger.info(f"Worker hello received: {info}")
         self._proto_version = info.get("proto_version", "1.0")
-        caps = info.get("capabilities") or {}
-        self._cap_get_kind = bool(caps.get("get_kind"))
-        self._cap_dir = bool(caps.get("dir"))
-        self._cap_get_slice = bool(caps.get("get_slice"))
 
         if require_x86_64:
             if str(info.get("machine", "")).lower() != "x86_64":
@@ -857,10 +853,8 @@ class _WorkerProc:
         return ("value", resp)
 
     def dir(self):
-        """Return list of public attribute names if worker supports dir RPC; else empty list."""
-        if getattr(self, "_cap_dir", False):
-            return self._send_rpc("dir", {})
-        return []
+        """Return list of public attribute names."""
+        return self._send_rpc("dir", {})
 
     def set(self, name: str, value: Any):
         logger.debug(f"Setting attribute: {name}")
@@ -1316,28 +1310,15 @@ class tempopulsar:
         def _remote_method(*args, **kwargs):
             return self._rpc("call", name=name, args=args, kwargs=kwargs)
 
-        # Non-exceptional discovery using get-kind if available
-        try:
-            if self._wp and getattr(self._wp, "_cap_get_kind", False):
-                kind, payload = self._wp.get_kind(name)
-                if kind == "value":
-                    return payload
-                if kind == "callable":
-                    return _remote_method
-                if kind == "missing":
-                    raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-                raise Tempo2ProtocolError(f"unexpected get-kind '{kind}' for attribute '{name}'")
-        except Exception:
-            pass
-
-        # Legacy fallback: try get and assume callable on failure
-        try:
-            val = self._rpc("get", name=name)
-            if not callable(val):
-                return val
+        # Non-exceptional discovery using get-kind
+        kind, payload = self._wp.get_kind(name)
+        if kind == "value":
+            return payload
+        if kind == "callable":
             return _remote_method
-        except (Tempo2Error, Tempo2Timeout, Tempo2Crashed, Tempo2ProtocolError):
-            return _remote_method
+        if kind == "missing":
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        raise Tempo2ProtocolError(f"unexpected get-kind '{kind}' for attribute '{name}'")
 
     def __setattr__(self, name: str, value: Any):
         if name in tempopulsar.__slots__:
@@ -1348,8 +1329,7 @@ class tempopulsar:
     def __dir__(self):
         """Return a list of available attributes for dir() function."""
         try:
-            if self._wp and getattr(self._wp, "_cap_dir", False):
-                return list(self._wp.dir())
+            return list(self._wp.dir())
         except Exception:
             pass
 
@@ -1424,34 +1404,18 @@ class _ParamProxy:
 
     def __getattr__(self, attr: str):
         # Fetch field via dotted get path (e.g., RAJ.val), honoring get-kind
-        try:
-            if self._parent._wp and getattr(self._parent._wp, "_cap_get_kind", False):
-                kind, payload = self._parent._wp.get_kind(f"{self._name}.{attr}")
-                if kind == "value":
-                    return payload
-                if kind == "callable":
-                    # Expose a callable that routes via call with dotted name
-                    def _remote_method(*args, **kwargs):
-                        return self._parent._rpc("call", name=f"{self._name}.{attr}", args=args, kwargs=kwargs)
+        kind, payload = self._parent._wp.get_kind(f"{self._name}.{attr}")
+        if kind == "value":
+            return payload
+        if kind == "callable":
+            # Expose a callable that routes via call with dotted name
+            def _remote_method(*args, **kwargs):
+                return self._parent._rpc("call", name=f"{self._name}.{attr}", args=args, kwargs=kwargs)
 
-                    return _remote_method
-                if kind == "missing":
-                    raise AttributeError(f"'{self._name}' has no attribute '{attr}'")
-        except Exception:
-            pass
-        # Legacy fallback: direct get
-        resp = self._parent._rpc("get", name=f"{self._name}.{attr}")
-        if isinstance(resp, dict) and "kind" in resp:
-            if resp["kind"] == "value":
-                return resp.get("value")
-            if resp["kind"] == "callable":
-
-                def _remote_method(*args, **kwargs):
-                    return self._parent._rpc("call", name=f"{self._name}.{attr}", args=args, kwargs=kwargs)
-
-                return _remote_method
+            return _remote_method
+        if kind == "missing":
             raise AttributeError(f"'{self._name}' has no attribute '{attr}'")
-        return resp
+        raise Tempo2ProtocolError(f"unexpected get-kind '{kind}' for attribute '{self._name}.{attr}'")
 
     def __setattr__(self, attr: str, value: Any) -> None:
         if attr in _ParamProxy.__slots__:
@@ -1479,30 +1443,16 @@ class _ArrayProxy:
     def __array__(self, dtype=None):
         import numpy as _np
 
-        arr = None
-        try:
-            # Prefer get-kind if supported to avoid unnecessary data shapes
-            if self._parent._wp and getattr(self._parent._wp, "_cap_get_kind", False):
-                kind, payload = self._parent._wp.get_kind(self._name)
-                if kind == "value":
-                    arr = payload
-                elif kind == "callable":
-                    # Arrays are not callable; treat as empty
-                    arr = []
-                else:
-                    arr = []
-            else:
-                resp = self._parent._rpc("get", name=self._name)
-                if isinstance(resp, dict) and "kind" in resp:
-                    arr = resp.get("value")
-                else:
-                    arr = resp
-        except Exception:
-            resp = self._parent._rpc("get", name=self._name)
-            if isinstance(resp, dict) and "kind" in resp:
-                arr = resp.get("value")
-            else:
-                arr = resp
+        # Use get-kind to get the array data
+        kind, payload = self._parent._wp.get_kind(self._name)
+        if kind == "value":
+            arr = payload
+        elif kind == "callable":
+            # Arrays are not callable; treat as empty
+            arr = []
+        else:
+            arr = []
+        
         a = _np.asarray(arr)
         if dtype is not None:
             a = a.astype(dtype, copy=False)
@@ -1522,12 +1472,7 @@ class _ArrayProxy:
 
     # python indexing
     def __getitem__(self, idx):
-        try:
-            if self._parent._wp and getattr(self._parent._wp, "_cap_get_slice", False):
-                return self._parent._wp.get_slice(self._name, idx)
-        except Exception:
-            pass
-        return self.__array__()[idx]
+        return self._parent._wp.get_slice(self._name, idx)
 
     def __setitem__(self, idx, value):
         _ = self._parent._rpc("setitem", name=self._name, index=idx, value=value)
