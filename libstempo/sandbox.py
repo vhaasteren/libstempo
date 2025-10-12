@@ -80,6 +80,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Mapping
 
 # Import TimFileAnalyzer for proactive TOA counting
 from .tim_file_analyzer import TimFileAnalyzer
@@ -141,6 +142,11 @@ class Policy:
     auto_nobs_retry: bool = True  # automatically add nobs parameter for large TOA files
     nobs_threshold: int = 10000  # add nobs parameter if TOA count exceeds this threshold
     nobs_safety_margin: float = 1.1  # multiplier for nobs parameter (e.g., 1.1 = 10% more than actual count)
+
+    # Logging / stderr capture
+    stderr_ring_max_lines: int = 20000
+    stderr_log_file: Optional[str] = None
+    include_stderr_tail_in_errors: int = 200  # 0 disables tail inclusion
 
 
 # -------------------------- Wire serialization helpers --------------------- #
@@ -219,6 +225,8 @@ def _worker_stdio_main() -> None:
             "platform": platform.platform(),
             "has_libstempo": False,
             "tempo2_version": None,
+            "proto_version": "1.2",
+            "capabilities": {"get_kind": True, "dir": True, "setitem": True, "get_slice": True, "path_access": True},
         }
     }
     try:
@@ -331,22 +339,147 @@ def _worker_stdio_main() -> None:
 
             if method == "get":
                 name = params["name"]
-                val = getattr(obj, name)
-                # copy numpy views to decouple from lib memory
-                try:
-                    import numpy as _np2  # local alias
+                # Support dotted path and mapping access for parameters (e.g., 'RAJ.val')
+                parts = str(name).split(".") if isinstance(name, str) else [name]
+                cur = obj
+                missing = False
+                for idx, part in enumerate(parts):
+                    # First hop supports attribute or mapping access
+                    if idx == 0:
+                        try:
+                            if hasattr(cur, part):
+                                cur = getattr(cur, part)
+                            elif isinstance(cur, Mapping) or hasattr(cur, "__getitem__"):
+                                cur = cur[part]
+                            else:
+                                raise AttributeError
+                        except Exception:
+                            missing = True
+                            break
+                    else:
+                        try:
+                            cur = getattr(cur, part)
+                        except Exception:
+                            missing = True
+                            break
 
-                    if hasattr(val, "base") and isinstance(val, _np2.ndarray):
-                        val = val.copy()
+                if missing:
+                    _write_response(
+                        {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py({"kind": "missing", "value": None})}
+                    )
+                    continue
+
+                # cur is the resolved object/value
+                if callable(cur):
+                    _write_response(
+                        {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py({"kind": "callable", "value": None})}
+                    )
+                    continue
+
+                try:
+                    import numpy as _np2
+
+                    if isinstance(cur, _np2.ndarray):
+                        cur = cur.copy(order="C")
+                    elif isinstance(cur, _np2.generic):
+                        cur = cur.item()
                 except Exception:
                     pass
-                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(val)})
+
+                _write_response(
+                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py({"kind": "value", "value": cur})}
+                )
                 continue
 
             if method == "set":
                 name, value = params["name"], params["value"]
-                setattr(obj, name, value)
+                # Support dotted path and mapping access for parameters (e.g., 'RAJ.val')
+                parts = str(name).split(".") if isinstance(name, str) else [name]
+                cur = obj
+                missing = False
+                # Traverse to parent of target
+                for idx, part in enumerate(parts[:-1]):
+                    try:
+                        if idx == 0:
+                            if hasattr(cur, part):
+                                cur = getattr(cur, part)
+                            elif isinstance(cur, Mapping) or hasattr(cur, "__getitem__"):
+                                cur = cur[part]
+                            else:
+                                raise AttributeError
+                        else:
+                            cur = getattr(cur, part)
+                    except Exception:
+                        missing = True
+                        break
+                if missing:
+                    _write_response(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": rid,
+                            "error": {
+                                "code": -32000,
+                                "message": f"AttributeError: cannot resolve path for set: {name}",
+                                "data": "",
+                            },
+                        }
+                    )
+                    continue
+                target = parts[-1]
+                try:
+                    setattr(cur, target, value)
+                except Exception:
+                    et, ev, tb = _format_exc_tuple()
+                    _write_response(
+                        {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{et}: {ev}", "data": tb}}
+                    )
+                    continue
                 _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)})
+                continue
+
+            if method == "setitem":
+                # Set slice(s) on numpy array attributes like stoas, toaerrs
+                name = params["name"]
+                index = params["index"]
+                value = params["value"]
+                try:
+                    arr = getattr(obj, name)
+                    try:
+                        import numpy as _np2
+
+                        if isinstance(value, _np2.ndarray) and not _np2.can_cast(
+                            value.dtype, arr.dtype, casting="safe"
+                        ):
+                            value = value.astype(arr.dtype, copy=False)
+                    except Exception:
+                        pass
+                    arr[index] = value
+                    _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)})
+                except Exception:
+                    et, ev, tb = _format_exc_tuple()
+                    _write_response(
+                        {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{et}: {ev}", "data": tb}}
+                    )
+                continue
+
+            if method == "get_slice":
+                name = params["name"]
+                index = params["index"]
+                try:
+                    arr = getattr(obj, name)
+                    import numpy as _np2
+
+                    out = arr[index]
+                    if isinstance(out, _np2.ndarray):
+                        out = out.copy(order="C")
+                    elif isinstance(out, _np2.generic):
+                        out = out.item()
+                    _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(out)})
+                except Exception:
+                    et, ev, tb = _format_exc_tuple()
+                    _write_response(
+                        {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{et}: {ev}", "data": tb}}
+                    )
                 continue
 
             if method == "call":
@@ -358,8 +491,11 @@ def _worker_stdio_main() -> None:
                 try:
                     import numpy as _np2
 
-                    if hasattr(out, "base") and isinstance(out, _np2.ndarray):
-                        out = out.copy()
+                    if isinstance(out, _np2.ndarray):
+                        # Always copy numpy arrays to avoid C++ object references
+                        out = out.copy(order="C")
+                    elif isinstance(out, _np2.generic):
+                        out = out.item()
                 except Exception:
                     pass
                 _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(out)})
@@ -372,6 +508,15 @@ def _worker_stdio_main() -> None:
                     pass
                 obj = None
                 _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(None)})
+                continue
+
+            if method == "dir":
+                names = []
+                for n in dir(obj):
+                    if not n.startswith("_"):
+                        names.append(n)
+                names.sort()
+                _write_response({"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py(names)})
                 continue
 
             _write_response(
@@ -422,6 +567,12 @@ class _WorkerProc:
 
         logger.debug(f"Launching subprocess with environment: PYTHONUNBUFFERED={env.get('PYTHONUNBUFFERED')}")
         logger.debug(f"Subprocess working directory: {os.getcwd()}")
+        creationflags = 0
+        if os.name == "nt":
+            try:
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            except Exception:
+                creationflags = 0
         self.proc = subprocess.Popen(
             self.cmd,
             stdin=subprocess.PIPE,
@@ -430,6 +581,10 @@ class _WorkerProc:
             text=True,
             bufsize=1,  # line buffered
             cwd=os.getcwd(),  # Explicitly set working directory
+            env=env,
+            close_fds=True,
+            start_new_session=True,
+            creationflags=creationflags,
         )
 
         logger.debug(f"Worker process started with PID: {self.proc.pid}")
@@ -438,21 +593,36 @@ class _WorkerProc:
         import threading
         import collections
 
-        self._log_buf = collections.deque(maxlen=20000)
+        self._log_buf = collections.deque(maxlen=self.policy.stderr_ring_max_lines)
+        log_file = None
+        if self.policy.stderr_log_file:
+            try:
+                log_file = open(self.policy.stderr_log_file, "a", buffering=1, encoding="utf-8")
+            except Exception:
+                log_file = None
 
-        def _drain_stderr(pipe, sink_deque):
+        def _drain_stderr(pipe, sink_deque, sink_file):
             try:
                 for line in iter(pipe.readline, ""):
                     line = line.rstrip("\n")
                     sink_deque.append(line)
+                    if sink_file:
+                        try:
+                            sink_file.write(line + "\n")
+                        except Exception:
+                            pass
                     logger.debug("[tempo2-stderr] %s", line)
             finally:
                 with contextlib.suppress(Exception):
                     pipe.close()
+                if sink_file:
+                    with contextlib.suppress(Exception):
+                        sink_file.flush()
+                        sink_file.close()
 
         if self.proc.stderr is not None:
             self._stderr_thread = threading.Thread(
-                target=_drain_stderr, args=(self.proc.stderr, self._log_buf), daemon=True
+                target=_drain_stderr, args=(self.proc.stderr, self._log_buf, log_file), daemon=True
             )
             self._stderr_thread.start()
 
@@ -478,6 +648,11 @@ class _WorkerProc:
 
         info = hello_obj.get("hello", {})
         logger.info(f"Worker hello received: {info}")
+        self._proto_version = info.get("proto_version", "1.0")
+        caps = info.get("capabilities") or {}
+        self._cap_get_kind = bool(caps.get("get_kind"))
+        self._cap_dir = bool(caps.get("dir"))
+        self._cap_get_slice = bool(caps.get("get_slice"))
 
         if require_x86_64:
             if str(info.get("machine", "")).lower() != "x86_64":
@@ -526,19 +701,30 @@ class _WorkerProc:
 
     def _hard_kill(self):
         if self.proc and self.proc.poll() is None:
-            logger.warning(f"Hard killing worker process (PID: {self.proc.pid})")
+            logger.debug(f"Hard killing worker process (PID: {self.proc.pid})")
             try:
-                self.proc.terminate()
+                if os.name == "nt":
+                    with contextlib.suppress(Exception):
+                        self.proc.terminate()
+                else:
+                    os.killpg(self.proc.pid, signal.SIGTERM)
             except Exception as e:
-                logger.warning(f"Failed to terminate process: {e}")
-                pass
+                logger.warning(f"Failed to terminate process group: {e}; falling back to terminate()")
+                with contextlib.suppress(Exception):
+                    self.proc.terminate()
             t0 = time.time()
             while self.proc.poll() is None and (time.time() - t0) < self.policy.kill_grace_s:
                 time.sleep(0.01)
             if self.proc.poll() is None:
-                logger.warning(f"Sending SIGKILL to worker process (PID: {self.proc.pid})")
+                logger.debug(f"Sending SIGKILL to worker process (PID: {self.proc.pid})")
                 with contextlib.suppress(Exception):
-                    os.kill(self.proc.pid, signal.SIGKILL)
+                    try:
+                        if os.name == "nt":
+                            self.proc.kill()
+                        else:
+                            os.killpg(self.proc.pid, signal.SIGKILL)
+                    except Exception:
+                        os.kill(self.proc.pid, signal.SIGKILL)
         self.proc = None
 
     def close(self):
@@ -567,7 +753,9 @@ class _WorkerProc:
 
         self._id += 1
         rid = self._id
-        logger.debug(f"Sending RPC {method} (id: {rid})")
+        # Only log debug for non-get methods to reduce noise
+        if method != "get":
+            logger.debug(f"Sending RPC {method} (id: {rid})")
 
         frame = {
             "jsonrpc": "2.0",
@@ -577,9 +765,15 @@ class _WorkerProc:
         }
         line = json.dumps(frame) + "\n"
 
+        # Protect frames from interleaving
+        import threading
+
+        if not hasattr(self, "_rpc_lock"):
+            self._rpc_lock = threading.Lock()
         try:
-            self.proc.stdin.write(line)
-            self.proc.stdin.flush()
+            with self._rpc_lock:
+                self.proc.stdin.write(line)
+                self.proc.stdin.flush()
         except Exception as e:
             logger.error(f"Failed to send RPC {method}: {e}")
             self._hard_kill()
@@ -619,9 +813,23 @@ class _WorkerProc:
             msg = err.get("message", "error")
             data = err.get("data", "")
             logger.error(f"RPC {method} failed: {msg}")
-            raise Tempo2Error(f"{msg}\n{data}")
+            tail = ""
+            if getattr(self, "_log_buf", None) and (self.policy.include_stderr_tail_in_errors or 0) > 0:
+                try:
+                    tail_lines = list(self._log_buf)[-self.policy.include_stderr_tail_in_errors :]
+                    if tail_lines:
+                        blob = "\n".join(tail_lines)
+                        max_bytes = 16384
+                        if len(blob) > max_bytes:
+                            blob = blob[-max_bytes:]
+                        tail = "\n--- tempo2 stderr (tail) ---\n" + blob
+                except Exception:
+                    tail = ""
+            raise Tempo2Error(f"{msg}\n{data}{tail}")
 
-        logger.debug(f"RPC {method} completed successfully")
+        # Only log debug for non-get methods to reduce noise
+        if method != "get":
+            logger.debug(f"RPC {method} completed successfully")
         result_b64 = resp.get("result_b64", None)
         return _b64_loads_py(result_b64) if result_b64 is not None else None
 
@@ -635,6 +843,21 @@ class _WorkerProc:
         logger.debug(f"Getting attribute: {name}")
         return self._send_rpc("get", {"name": name})
 
+    def get_kind(self, name: str):
+        """Return (kind, value) where kind in {"value","callable","missing"}.
+        For legacy workers without get-kind support, assumes raw value => ("value", value).
+        """
+        resp = self._send_rpc("get", {"name": name})
+        if isinstance(resp, dict) and "kind" in resp:
+            return (resp.get("kind"), resp.get("value"))
+        return ("value", resp)
+
+    def dir(self):
+        """Return list of public attribute names if worker supports dir RPC; else empty list."""
+        if getattr(self, "_cap_dir", False):
+            return self._send_rpc("dir", {})
+        return []
+
     def set(self, name: str, value: Any):
         logger.debug(f"Setting attribute: {name}")
         return self._send_rpc("set", {"name": name, "value": value})
@@ -642,6 +865,14 @@ class _WorkerProc:
     def call(self, name: str, args=(), kwargs=None):
         logger.debug(f"Calling method: {name} with args={args}, kwargs={kwargs}")
         return self._send_rpc("call", {"name": name, "args": tuple(args), "kwargs": dict(kwargs or {})})
+
+    def setitem(self, name: str, index, value: Any):
+        logger.debug(f"Setting array slice: {name}[{index}] = <value>")
+        return self._send_rpc("setitem", {"name": name, "index": index, "value": value})
+
+    def get_slice(self, name: str, index):
+        logger.debug(f"Getting array slice: {name}[{index}]")
+        return self._send_rpc("get_slice", {"name": name, "index": index})
 
     def rss(self) -> Optional[int]:
         try:
@@ -874,6 +1105,26 @@ class tempopulsar:
     def _construct_with_retries(self):
         logger.info(f"Starting construction with {self._policy.ctor_retry + 1} total attempts")
 
+        # Fast-fail on missing input files to avoid noisy retries
+        try:
+            parfile = self._ctor_kwargs.get("parfile")
+            timfile = self._ctor_kwargs.get("timfile")
+            cwd = os.getcwd()
+            if parfile and not Path(parfile).exists():
+                raise Tempo2ConstructorFailed(
+                    f"parfile not found: {parfile} (cwd: {cwd}). Provide an absolute path or correct relative path."
+                )
+            if timfile and not Path(timfile).exists():
+                raise Tempo2ConstructorFailed(
+                    f"timfile not found: {timfile} (cwd: {cwd}). Provide an absolute path or correct relative path."
+                )
+        except Tempo2ConstructorFailed:
+            # Re-raise to surface a clean single error without retries
+            raise
+        except Exception:
+            # Do not block construction for unexpected preflight errors
+            logger.debug("Preflight path check skipped due to unexpected error:", exc_info=True)
+
         # Proactive TOA counting to avoid "Too many TOAs" errors
         if self._policy.auto_nobs_retry:
             self._proactive_nobs_setup()
@@ -898,6 +1149,14 @@ class tempopulsar:
             except Exception as e:
                 logger.warning(f"Construction attempt {attempt + 1} failed: {e}")
                 last_exc = e
+                # If it's a file-not-found style error, fail fast without retries
+                msg = str(e)
+                if any(
+                    t in msg
+                    for t in ("Cannot find parfile", "Cannot find timfile", "parfile not found", "timfile not found")
+                ):
+                    logger.error("Input file missing; not retrying constructor.")
+                    break
                 # kill and retry
                 try:
                     if self._wp:
@@ -1006,14 +1265,18 @@ class tempopulsar:
                 out = self._wp.set(payload["name"], payload["value"])
             elif call == "call":
                 out = self._wp.call(payload["name"], payload.get("args", ()), payload.get("kwargs", {}))
+            elif call == "setitem":
+                out = self._wp.setitem(payload["name"], payload.get("index"), payload.get("value"))
             else:
                 raise Tempo2ProtocolError(f"unknown call {call}")
             self._state.calls_ok += 1
             logger.debug(f"RPC {call} successful, total calls: {self._state.calls_ok}")
             return out
         except (Tempo2Timeout, Tempo2Crashed, Tempo2ProtocolError, Tempo2Error) as e:
-            logger.warning(f"RPC {call} failed with {type(e).__name__}: {e}")
-            logger.info("Attempting automatic worker recycle and retry")
+            # Only log warnings for actual failures, not expected attribute discovery failures
+            if call != "get" or not str(e).startswith("AttributeError"):
+                logger.warning(f"RPC {call} failed with {type(e).__name__}: {e}")
+                logger.info("Attempting automatic worker recycle and retry")
             # automatic one-time recycle on a fresh worker
             self._recycle()
             assert self._wp is not None
@@ -1024,7 +1287,8 @@ class tempopulsar:
             else:
                 out = self._wp.call(payload["name"], payload.get("args", ()), payload.get("kwargs", {}))
             self._state.calls_ok += 1
-            logger.info(f"RPC {call} succeeded after recycle, total calls: {self._state.calls_ok}")
+            if call != "get" or not str(e).startswith("AttributeError"):
+                logger.info(f"RPC {call} succeeded after recycle, total calls: {self._state.calls_ok}")
             return out
 
     # ------------------------ Attribute proxying magic ------------------------ #
@@ -1048,20 +1312,67 @@ class tempopulsar:
         def _remote_method(*args, **kwargs):
             return self._rpc("call", name=name, args=args, kwargs=kwargs)
 
-        # Try a GET first; if it errors, assume it's a method
+        # Non-exceptional discovery using get-kind if available
+        try:
+            if self._wp and getattr(self._wp, "_cap_get_kind", False):
+                kind, payload = self._wp.get_kind(name)
+                if kind == "value":
+                    return payload
+                if kind == "callable":
+                    return _remote_method
+                if kind == "missing":
+                    raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+                raise Tempo2ProtocolError(f"unexpected get-kind '{kind}' for attribute '{name}'")
+        except Exception:
+            pass
+
+        # Legacy fallback: try get and assume callable on failure
         try:
             val = self._rpc("get", name=name)
-        except Tempo2Error:
+            if not callable(val):
+                return val
             return _remote_method
-        if callable(val):
+        except (Tempo2Error, Tempo2Timeout, Tempo2Crashed, Tempo2ProtocolError):
             return _remote_method
-        return val
 
     def __setattr__(self, name: str, value: Any):
         if name in tempopulsar.__slots__:
             return object.__setattr__(self, name, value)
         _ = self._rpc("set", name=name, value=value)
         return None
+
+    def __dir__(self):
+        """Return a list of available attributes for dir() function."""
+        try:
+            if self._wp and getattr(self._wp, "_cap_dir", False):
+                return list(self._wp.dir())
+        except Exception:
+            pass
+
+        # Fallback: return a basic set of common tempopulsar attributes
+        return [
+            "name",
+            "nobs",
+            "stoas",
+            "toaerrs",
+            "freqs",
+            "ndim",
+            "residuals",
+            "designmatrix",
+            "toas",
+            "fit",
+            "vals",
+            "errs",
+            "pars",
+            "flags",
+            "flagvals",
+            "savepar",
+            "savetim",
+            "chisq",
+            "rms",
+            "ssbfreqs",
+            "logs",
+        ]
 
     # Explicit helpers for common call shapes
     def residuals(self, **kwargs):
@@ -1078,6 +1389,162 @@ class tempopulsar:
 
     def logs(self, tail: int = 500) -> str:
         return self._wp.logs(tail) if self._wp else ""
+
+    # Mapping-style access to parameters, proxied to libstempo
+    def __getitem__(self, key: str):
+        return _ParamProxy(self, key)
+
+    def __setitem__(self, key: str, value: Any):
+        raise TypeError("Direct assignment to parameters is not supported; set fields like psr['RAJ'].val = x")
+
+    # Expose array-like attributes as write-through proxies
+    @property
+    def stoas(self):
+        return _ArrayProxy(self, "stoas")
+
+    @property
+    def toaerrs(self):
+        return _ArrayProxy(self, "toaerrs")
+
+    @property
+    def freqs(self):
+        return _ArrayProxy(self, "freqs")
+
+
+class _ParamProxy:
+    __slots__ = ("_parent", "_name")
+
+    def __init__(self, parent: tempopulsar, name: str) -> None:
+        object.__setattr__(self, "_parent", parent)
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, attr: str):
+        # Fetch field via dotted get path (e.g., RAJ.val), honoring get-kind
+        try:
+            if self._parent._wp and getattr(self._parent._wp, "_cap_get_kind", False):
+                kind, payload = self._parent._wp.get_kind(f"{self._name}.{attr}")
+                if kind == "value":
+                    return payload
+                if kind == "callable":
+                    # Expose a callable that routes via call with dotted name
+                    def _remote_method(*args, **kwargs):
+                        return self._parent._rpc("call", name=f"{self._name}.{attr}", args=args, kwargs=kwargs)
+
+                    return _remote_method
+                if kind == "missing":
+                    raise AttributeError(f"'{self._name}' has no attribute '{attr}'")
+        except Exception:
+            pass
+        # Legacy fallback: direct get
+        resp = self._parent._rpc("get", name=f"{self._name}.{attr}")
+        if isinstance(resp, dict) and "kind" in resp:
+            if resp["kind"] == "value":
+                return resp.get("value")
+            if resp["kind"] == "callable":
+
+                def _remote_method(*args, **kwargs):
+                    return self._parent._rpc("call", name=f"{self._name}.{attr}", args=args, kwargs=kwargs)
+
+                return _remote_method
+            raise AttributeError(f"'{self._name}' has no attribute '{attr}'")
+        return resp
+
+    def __setattr__(self, attr: str, value: Any) -> None:
+        if attr in _ParamProxy.__slots__:
+            return object.__setattr__(self, attr, value)
+        _ = self._parent._rpc("set", name=f"{self._name}.{attr}", value=value)
+        return None
+
+    def __repr__(self) -> str:
+        try:
+            v = self.__getattr__("val")
+            e = self.__getattr__("err")
+            return f"<ParamProxy {self._name}: val={v!r}, err={e!r}>"
+        except Exception:
+            return f"<ParamProxy {self._name}>"
+
+
+class _ArrayProxy:
+    __slots__ = ("_parent", "_name")
+
+    def __init__(self, parent: tempopulsar, name: str) -> None:
+        object.__setattr__(self, "_parent", parent)
+        object.__setattr__(self, "_name", name)
+
+    # numpy reads
+    def __array__(self, dtype=None):
+        import numpy as _np
+
+        arr = None
+        try:
+            # Prefer get-kind if supported to avoid unnecessary data shapes
+            if self._parent._wp and getattr(self._parent._wp, "_cap_get_kind", False):
+                kind, payload = self._parent._wp.get_kind(self._name)
+                if kind == "value":
+                    arr = payload
+                elif kind == "callable":
+                    # Arrays are not callable; treat as empty
+                    arr = []
+                else:
+                    arr = []
+            else:
+                resp = self._parent._rpc("get", name=self._name)
+                if isinstance(resp, dict) and "kind" in resp:
+                    arr = resp.get("value")
+                else:
+                    arr = resp
+        except Exception:
+            resp = self._parent._rpc("get", name=self._name)
+            if isinstance(resp, dict) and "kind" in resp:
+                arr = resp.get("value")
+            else:
+                arr = resp
+        a = _np.asarray(arr)
+        if dtype is not None:
+            a = a.astype(dtype, copy=False)
+        return a
+
+    def __len__(self):
+        a = self.__array__()
+        return int(a.shape[0]) if getattr(a, "ndim", 1) > 0 else 1
+
+    @property
+    def shape(self):
+        return self.__array__().shape
+
+    @property
+    def dtype(self):
+        return self.__array__().dtype
+
+    # python indexing
+    def __getitem__(self, idx):
+        try:
+            if self._parent._wp and getattr(self._parent._wp, "_cap_get_slice", False):
+                return self._parent._wp.get_slice(self._name, idx)
+        except Exception:
+            pass
+        return self.__array__()[idx]
+
+    def __setitem__(self, idx, value):
+        _ = self._parent._rpc("setitem", name=self._name, index=idx, value=value)
+        return None
+
+    def __repr__(self) -> str:
+        try:
+            return repr(self.__array__())
+        except Exception:
+            return f"<_ArrayProxy {self._name}>"
+
+    def __str__(self) -> str:
+        try:
+            return str(self.__array__())
+        except Exception:
+            return self.__repr__()
+
+    # Delegate unknown attributes/methods to the numpy array
+    def __getattr__(self, name: str):
+        arr = self.__array__()
+        return getattr(arr, name)
 
     def __del__(self):
         with contextlib.suppress(Exception):

@@ -116,6 +116,69 @@ class TestSandbox(unittest.TestCase):
                 self.assertEqual(par_name in s_fit, par_name in n_fit)
                 self.assertEqual(par_name in s_set, par_name in n_set)
 
+    def test_param_proxy_accessors(self):
+        """Test psr['parname'].val/err/fit/set mapping accessors and roundtrips."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Choose parameters that are present and safe to touch
+        par_val = "RAJ"
+        par_fit = "DM"  # commonly present and safe to toggle fit flag
+
+        # Read val/err via mapping
+        v0 = psr[par_val].val
+        e0 = psr[par_val].err
+        self.assertIsInstance(float(v0), float)
+        self.assertIsInstance(float(e0), float)
+
+        # Roundtrip val by setting the same value (as Python float)
+        psr[par_val].val = float(v0)
+        self.assertAlmostEqual(float(psr[par_val].val), float(v0), places=12)
+
+        # Roundtrip err by setting the same value (as Python float)
+        psr[par_val].err = float(e0)
+        self.assertAlmostEqual(float(psr[par_val].err), float(e0), places=12)
+
+        # Toggle fit flag and revert
+        fit0 = bool(psr[par_fit].fit)
+        psr[par_fit].fit = not fit0
+        self.assertEqual(bool(psr[par_fit].fit), (not fit0))
+        # revert
+        psr[par_fit].fit = fit0
+        self.assertEqual(bool(psr[par_fit].fit), fit0)
+
+        # 'set' flag should be boolean and readable; do not change it here
+        self.assertIsInstance(bool(psr[par_val].set), bool)
+
+    def test_stoas_edit_and_fit_matches_native(self):
+        """Edit stoas and toaerrs, run fit, and compare residuals to native."""
+        rng = np.random.default_rng(12345)
+
+        # Sandbox and native
+        psr_s = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        psr_n = t2.tempopulsar(parfile=self.parfile, timfile=self.timfile)
+
+        # Create identical noise realization
+        noise = 0.1e-6 * rng.standard_normal(psr_s.nobs) / 86400.0
+
+        # Apply to stoas and toaerrs in both
+        # Sandbox: use write-through proxies (backward compatible API)
+        psr_s.stoas[:] = psr_s.stoas[:] + noise
+        psr_s.toaerrs[:] = 0.1
+
+        # Native
+        psr_n.stoas[:] = psr_n.stoas + noise
+        psr_n.toaerrs[:] = 0.1
+
+        # Fit both
+        _ = psr_s.fit()
+        _ = psr_n.fit()
+
+        # Compare residuals tightly
+        res_s = psr_s.residuals()
+        res_n = psr_n.residuals()
+        self.assertEqual(res_s.shape, res_n.shape)
+        assert_allclose(res_s, res_n, rtol=0, atol=0)
+
 
 class TestTimFileAnalyzer(unittest.TestCase):
     @classmethod
