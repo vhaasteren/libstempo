@@ -589,7 +589,7 @@ class _WorkerProc:
 
         logger.debug(f"Worker process started with PID: {self.proc.pid}")
 
-        # Start background stderr drain to avoid backpressure and capture logs
+        # Start background stderr drain to capture logs AND output to real-time stderr
         import threading
         import collections
 
@@ -606,6 +606,10 @@ class _WorkerProc:
                 for line in iter(pipe.readline, ""):
                     line = line.rstrip("\n")
                     sink_deque.append(line)
+                    
+                    # Write to real stderr for real-time output (native-like behavior)
+                    print(line, file=sys.stderr, flush=True)
+                    
                     if sink_file:
                         try:
                             sink_file.write(line + "\n")
