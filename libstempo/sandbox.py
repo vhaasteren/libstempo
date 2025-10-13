@@ -167,7 +167,11 @@ def _b64_dumps_py(obj: Any) -> str:
 
 def _b64_loads_py(s: str) -> Any:
     """Deserialize base64-encoded string to Python object using cloudpickle."""
-    return _cp.loads(base64.b64decode(s.encode("ascii")))
+    if hasattr(s, 'encode'):
+        s_str = s
+    else:
+        s_str = str(s)
+    return _cp.loads(base64.b64decode(s_str.encode("ascii")))
 
 
 def _format_exc_tuple() -> Tuple[str, str, str]:
