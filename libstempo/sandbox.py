@@ -386,8 +386,76 @@ def _worker_stdio_main() -> None:
                 except Exception:
                     pass
 
+                # Safely serialize value; some libstempo/Boost.Python objects are not picklable
+                try:
+                    _ = _b64_dumps_py({"kind": "value", "value": cur})
+                    result_payload = {"kind": "value", "value": cur}
+                except Exception:
+                    # Best-effort conversion for libstempo parameter-like objects
+                    safe_value = None
+                    try:
+                        # Detect param-like structures (e.g., RAJ/DEC) and extract primitives
+                        has_val = hasattr(cur, "val") or hasattr(cur, "_val")
+                        has_err = hasattr(cur, "err") or hasattr(cur, "_err")
+                        has_fit = hasattr(cur, "fit") or hasattr(cur, "fitFlag") or hasattr(cur, "_fitFlag")
+                        if has_val or has_err or has_fit:
+                            val = None
+                            err = None
+                            fit = None
+                            with contextlib.suppress(Exception):
+                                v = getattr(cur, "val", getattr(cur, "_val", None))
+                                # Convert numpy scalars to Python
+                                try:
+                                    import numpy as _np2
+
+                                    if isinstance(v, _np2.generic):
+                                        v = v.item()
+                                except Exception:
+                                    pass
+                                val = v
+                            with contextlib.suppress(Exception):
+                                e = getattr(cur, "err", getattr(cur, "_err", None))
+                                try:
+                                    import numpy as _np2
+
+                                    if isinstance(e, _np2.generic):
+                                        e = e.item()
+                                except Exception:
+                                    pass
+                                err = e
+                            with contextlib.suppress(Exception):
+                                f = getattr(cur, "fit", None)
+                                if f is None:
+                                    f = getattr(cur, "fitFlag", getattr(cur, "_fitFlag", None))
+                                # Normalize to bool when possible
+                                if isinstance(f, (int, bool)):
+                                    fit = bool(f)
+                                else:
+                                    fit = f
+                            name_guess = None
+                            with contextlib.suppress(Exception):
+                                name_guess = getattr(cur, "name", None) or getattr(cur, "label", None)
+                            safe_value = {
+                                "__libstempo_param__": True,
+                                "name": name_guess,
+                                "val": val,
+                                "err": err,
+                                "fit": fit,
+                            }
+                        else:
+                            # Fallback to repr string if completely opaque
+                            safe_value = {"__repr__": repr(cur)}
+                    except Exception:
+                        safe_value = {"__repr__": repr(cur)}
+
+                    result_payload = {"kind": "value", "value": safe_value}
+
                 _write_response(
-                    {"jsonrpc": "2.0", "id": rid, "result_b64": _b64_dumps_py({"kind": "value", "value": cur})}
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "result_b64": _b64_dumps_py(result_payload),
+                    }
                 )
                 continue
 
@@ -1388,6 +1456,9 @@ class tempopulsar:
         # Non-exceptional discovery using get-kind
         kind, payload = self._wp.get_kind(name)
         if kind == "value":
+            # If worker returned a safe libstempo param marker, expose a proxy
+            if isinstance(payload, dict) and payload.get("__libstempo_param__"):
+                return _ParamProxy(self, name)
             return payload
         if kind == "callable":
             return _remote_method

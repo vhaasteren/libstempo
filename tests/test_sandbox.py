@@ -179,6 +179,58 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(res_s.shape, res_n.shape)
         assert_allclose(res_s, res_n, rtol=0, atol=0)
 
+    def test_param_attribute_proxy_no_pickling_and_roundtrip(self):
+        """Access psr.RAJ attribute (check pickling error) and roundtrip fields."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile, dofit=False)
+
+        # This attribute access used to force pickling of a non-picklable param object.
+        p = psr.RAJ
+
+        # Read primitives
+        v0 = float(p.val)
+        e0 = float(p.err)
+        f0 = bool(p.fit)
+
+        # Sanity on types
+        self.assertIsInstance(v0, float)
+        self.assertIsInstance(e0, float)
+        self.assertIsInstance(f0, bool)
+
+        # Roundtrip same values (ensures proxy->worker set path works)
+        p.val = v0
+        self.assertAlmostEqual(float(psr.RAJ.val), v0, places=12)
+
+        p.err = e0
+        self.assertAlmostEqual(float(psr.RAJ.err), e0, places=12)
+
+        # Toggle fit and revert
+        p.fit = not f0
+        self.assertEqual(bool(psr.RAJ.fit), (not f0))
+        p.fit = f0
+        self.assertEqual(bool(psr.RAJ.fit), f0)
+
+        # Proxy should be printable
+        _ = repr(p)
+        _ = str(p)
+
+    def test_param_attribute_vs_mapping_consistency(self):
+        """Ensure attribute-style psr.RAJ and mapping psr['RAJ'] remain consistent."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile, dofit=False)
+
+        # Values and errors agree between attribute and mapping APIs
+        self.assertAlmostEqual(float(psr.RAJ.val), float(psr["RAJ"].val), places=12)
+        self.assertAlmostEqual(float(psr.RAJ.err), float(psr["RAJ"].err), places=12)
+
+        # Setting via attribute reflects in mapping
+        new_val = float(psr.RAJ.val)
+        psr.RAJ.val = new_val
+        self.assertAlmostEqual(float(psr["RAJ"].val), new_val, places=12)
+
+        # Setting via mapping reflects in attribute
+        new_err = float(psr["RAJ"].err)
+        psr["RAJ"].err = new_err
+        self.assertAlmostEqual(float(psr.RAJ.err), new_err, places=12)
+
 
 class TestStateManagement(unittest.TestCase):
     """Tests for state management and crash recovery."""
