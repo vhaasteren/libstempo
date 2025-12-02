@@ -54,10 +54,10 @@ Logging:
     - Error details and recovery attempts
 
 Robustness:
-    The sandbox suppresses libstempo debug output during construction
-    to prevent interference with the JSON-RPC protocol. This ensures reliable
-    communication even when libstempo prints diagnostic messages. The suppression
-    works at the OS file descriptor level to catch output from C libraries.
+    The sandbox redirects stdout to stderr in worker processes before importing libstempo,
+    preventing interference with the JSON-RPC protocol. This ensures reliable
+    communication even when libstempo or other libraries print diagnostic messages.
+    The redirection works at the OS file descriptor level to catch output from C libraries.
 """
 
 from __future__ import annotations
@@ -211,14 +211,32 @@ def _worker_stdio_main() -> None:
          Methods: ctor, get, set, call, del, rss, bye
          Each request's 'params_b64' is a pickled dict of parameters.
          Each response uses 'result_b64' for Python results, or 'error'.
+
+    To prevent interference with the JSON-RPC protocol, stdout is redirected to stderr
+    before importing libstempo. This ensures clean communication even when libstempo
+    prints diagnostic messages. The redirection works at the OS file descriptor level.
     """
-    # Permanently redirect C-level stdout (FD 1) to stderr (FD 2),
-    # while keeping JSON-RPC on a dedicated duplicate of the original stdout pipe.
     import os as _os_for_fds
 
-    _proto_fd = _os_for_fds.dup(1)  # save original stdout FD for protocol
-    _os_for_fds.dup2(2, 1)  # route any C/printf stdout to stderr
-    sys.stdout = _os_for_fds.fdopen(_proto_fd, "w", buffering=1)
+    # Check if redirection was already set up by the subprocess command
+    _proto_out = None  # type: ignore
+    _env_fd = os.environ.get("TEMPO2_SANDBOX_PROTO_FD")
+    if _env_fd is not None:
+        try:
+            _proto_fd = int(_env_fd)
+            _proto_out = _os_for_fds.fdopen(_proto_fd, "w", buffering=1)
+        except Exception:
+            _proto_out = None
+        finally:
+            # Remove the hint to avoid leaking to children
+            with contextlib.suppress(Exception):
+                os.environ.pop("TEMPO2_SANDBOX_PROTO_FD", None)
+    if _proto_out is None:
+        # Fallback: perform redirection here if not done in command
+        _proto_fd = _os_for_fds.dup(1)  # save original stdout FD for protocol
+        _os_for_fds.dup2(2, 1)  # route any C/printf stdout to stderr
+        sys.stdout = sys.stderr  # route Python-level prints to stderr
+        _proto_out = _os_for_fds.fdopen(_proto_fd, "w", buffering=1)
 
     # Step 1: hello handshake
     hello = {
@@ -249,8 +267,8 @@ def _worker_stdio_main() -> None:
         except Exception:
             pass
     finally:
-        sys.stdout.write(json.dumps(hello) + "\n")
-        sys.stdout.flush()
+        _proto_out.write(json.dumps(hello) + "\n")
+        _proto_out.flush()
 
     # If libstempo failed to import at hello, try once more here to return clean errors
     try:
@@ -264,8 +282,8 @@ def _worker_stdio_main() -> None:
 
     def _write_response(resp: Dict[str, Any]) -> None:
         """Write JSON response to stdout and flush."""
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+        _proto_out.write(json.dumps(resp) + "\n")
+        _proto_out.flush()
 
     # JSON-RPC loop
     for line in sys.stdin:
@@ -1037,7 +1055,7 @@ def _resolve_worker_cmd(env_name: Optional[str]) -> Tuple[List[str], bool]:
     Returns (cmd, require_x86_64)
     """
 
-    # Base invocation that runs this file in worker mode:
+    # Base invocation that runs this file in worker mode.
     # Find the src directory dynamically
     current_file = Path(__file__).resolve()
     src_dir = current_file.parent.parent  # Go up from libstempo/sandbox.py to src/
@@ -1048,7 +1066,15 @@ def _resolve_worker_cmd(env_name: Optional[str]) -> Tuple[List[str], bool]:
         return [
             python_exe,
             "-c",
-            f"import sys; sys.path.insert(0, '{src_path}'); import libstempo.sandbox as m; m._worker_stdio_main()",
+            (
+                f"import os, sys; "
+                f"os.environ['TEMPO2_SANDBOX_PROTO_FD'] = str(os.dup(1)); "
+                f"os.dup2(2, 1); "
+                f"sys.stdout = sys.stderr; "
+                f"sys.path.insert(0, '{src_path}'); "
+                f"import libstempo.sandbox as m; "
+                f"m._worker_stdio_main()"
+            ),
         ]
 
     arch_prefix_env = os.environ.get("TEMPO2_SANDBOX_WORKER_ARCH_PREFIX", "").strip()
@@ -1069,15 +1095,7 @@ def _resolve_worker_cmd(env_name: Optional[str]) -> Tuple[List[str], bool]:
     # conda/mamba/micromamba
     if etype.startswith("conda:"):
         tool = etype.split(":", 1)[1]
-        cmd = [
-            tool,
-            "run",
-            "-n",
-            env_name,
-            "python",
-            "-c",
-            f"import sys; sys.path.insert(0, '{src_path}'); import libstempo.sandbox as m; m._worker_stdio_main()",
-        ]
+        cmd = [tool, "run", "-n", env_name] + python_to_worker_cmd("python")
         # Choosing to require x86_64 only if user *explicitly* asks via arch prefix or env_name == "arch"
         require_x86_64 = "arch" in env_name.lower()
         if arch_prefix_env:
