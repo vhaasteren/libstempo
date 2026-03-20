@@ -1683,6 +1683,31 @@ class _ArrayProxy:
         except Exception:
             return self.__repr__()
 
+    # Array arithmetic so that e.g. psr.toaerrs * 1e-6 works in plots
+    def __mul__(self, other):
+        return self.__array__() * other
+
+    def __rmul__(self, other):
+        return other * self.__array__()
+
+    def __add__(self, other):
+        return self.__array__() + other
+
+    def __radd__(self, other):
+        return other + self.__array__()
+
+    def __sub__(self, other):
+        return self.__array__() - other
+
+    def __rsub__(self, other):
+        return other - self.__array__()
+
+    def __truediv__(self, other):
+        return self.__array__() / other
+
+    def __rtruediv__(self, other):
+        return other / self.__array__()
+
     # Delegate unknown attributes/methods to the numpy array
     def __getattr__(self, name: str):
         arr = self.__array__()
