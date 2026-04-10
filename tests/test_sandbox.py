@@ -471,5 +471,170 @@ class TestTimFileAnalyzer(unittest.TestCase):
         self.assertEqual(count1, count3)
 
 
+class TestLoadMany(unittest.TestCase):
+    """Tests for load_many bulk loader."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = t2.__path__[0] + "/data/"
+        cls.parfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.par"
+        cls.timfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.tim"
+
+    def test_load_many_single_pulsar(self):
+        """Test load_many with a single pulsar."""
+        from libstempo.sandbox import load_many
+        pairs = [(self.parfile, self.timfile)]
+        ok, retried, failed = load_many(pairs, parallel=1)
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(len(failed), 0)
+        name = list(ok.keys())[0]
+        self.assertEqual(name, "1909-3744")
+
+    def test_load_many_with_generator(self):
+        """Test that load_many works with a generator (single-use iterable)."""
+        from libstempo.sandbox import load_many
+
+        def gen():
+            yield (self.parfile, self.timfile)
+
+        ok, retried, failed = load_many(gen(), parallel=1)
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(len(failed), 0)
+
+    def test_load_many_with_bad_file(self):
+        """Test load_many handles failures gracefully."""
+        from libstempo.sandbox import load_many
+        pairs = [("/nonexistent.par", "/nonexistent.tim")]
+        ok, retried, failed = load_many(pairs, policy=Policy(ctor_retry=0), parallel=1)
+        self.assertEqual(len(ok), 0)
+        self.assertEqual(len(failed), 1)
+        self.assertFalse(failed[0].ok)
+        self.assertIsNotNone(failed[0].error)
+
+    def test_load_many_empty(self):
+        """Test load_many with empty input."""
+        from libstempo.sandbox import load_many
+        ok, retried, failed = load_many([], parallel=1)
+        self.assertEqual(len(ok), 0)
+        self.assertEqual(len(failed), 0)
+
+
+class TestCrashRecoveryLive(unittest.TestCase):
+    """Tests that exercise real worker process death and recovery."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = t2.__path__[0] + "/data/"
+        cls.parfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.par"
+        cls.timfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.tim"
+
+    def test_kill_worker_and_auto_recover(self):
+        """Kill the worker subprocess and verify automatic recovery via _rpc."""
+        import os
+        import signal as sig
+
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        self.assertEqual(psr.name, "1909-3744")
+
+        pid = psr._wp.proc.pid
+        os.kill(pid, sig.SIGKILL)
+
+        import time
+        time.sleep(0.1)
+
+        # _rpc should detect the crashed worker, recycle, and succeed
+        res = psr.residuals()
+        self.assertEqual(len(res), 1001)
+
+    def test_kill_preserves_state(self):
+        """Kill the worker and verify param/array state is restored."""
+        import os
+        import signal as sig
+
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        original_raj = psr["RAJ"].val
+        psr["RAJ"].val = original_raj + 0.001
+
+        pid = psr._wp.proc.pid
+        os.kill(pid, sig.SIGKILL)
+        import time
+        time.sleep(0.1)
+
+        restored_raj = psr["RAJ"].val
+        self.assertAlmostEqual(restored_raj, original_raj + 0.001, places=6)
+
+
+class TestArrayProxyArithmetic(unittest.TestCase):
+    """Tests for _ArrayProxy arithmetic operators."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = t2.__path__[0] + "/data/"
+        cls.parfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.par"
+        cls.timfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.tim"
+
+    def test_mul(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        result = psr.stoas * 1.0
+        self.assertEqual(len(result), psr.nobs)
+
+    def test_rmul(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        result = 1.0 * psr.stoas
+        self.assertEqual(len(result), psr.nobs)
+
+    def test_add(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        result = psr.stoas + 0.0
+        np.testing.assert_allclose(result, np.asarray(psr.stoas))
+
+    def test_sub(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        result = psr.stoas - psr.stoas
+        np.testing.assert_allclose(result, np.zeros(psr.nobs))
+
+    def test_truediv(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        result = psr.stoas / 1.0
+        np.testing.assert_allclose(result, np.asarray(psr.stoas))
+
+    def test_numpy_ufunc_compat(self):
+        """Verify that np.asarray works on _ArrayProxy."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        arr = np.asarray(psr.stoas)
+        self.assertEqual(arr.shape, (psr.nobs,))
+
+    def test_len_and_shape(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        self.assertEqual(len(psr.stoas), psr.nobs)
+        self.assertEqual(psr.stoas.shape, (psr.nobs,))
+
+    def test_getattr_delegation(self):
+        """Verify that numpy array attributes are accessible on _ArrayProxy."""
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        self.assertTrue(hasattr(psr.stoas, "mean"))
+        mean = psr.stoas.mean()
+        self.assertIsInstance(float(mean), float)
+
+
+class TestPolicyExplicitParam(unittest.TestCase):
+    """Test that policy is now an explicit keyword parameter."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_path = t2.__path__[0] + "/data/"
+        cls.parfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.par"
+        cls.timfile = cls.data_path + "J1909-3744_NANOGrav_dfg+12.tim"
+
+    def test_policy_as_keyword(self):
+        policy = Policy(ctor_retry=1)
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile, policy=policy)
+        self.assertEqual(psr.name, "1909-3744")
+
+    def test_policy_default(self):
+        psr = tempopulsar(parfile=self.parfile, timfile=self.timfile)
+        self.assertEqual(psr._policy.ctor_retry, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
