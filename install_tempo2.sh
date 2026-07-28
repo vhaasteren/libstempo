@@ -20,15 +20,18 @@ tar zxvf 2021.07.1-correct.tar.gz
 cd psrsoft-tempo2-*
 
 # remove LT_LIB_DLLOAD from configure.ac
-sed_in_place="-i ''" # For macOS
-if [[ "$(uname -s)" == "Linux" ]]; then
-  sed_in_place="-i"   # For Linux
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  sed -i '' "s/LT_LIB_DLLOAD//g" "configure.ac"
+else
+  sed -i "s/LT_LIB_DLLOAD//g" "configure.ac"
 fi
-sed "$sed_in_place" "s/LT_LIB_DLLOAD//g" "configure.ac"
 
 ./bootstrap
-./configure --prefix=$prefix
-make && make install
+# Prevent autoconf from enabling C23 (where bool is a keyword),
+# which breaks tempo2's jpleph.c `typedef int bool;`
+./configure --prefix=$prefix ac_cv_prog_cc_c23=no
+make
+make install
 cp -r T2runtime/* $TEMPO2
 cd ..
 
