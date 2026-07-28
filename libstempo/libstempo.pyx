@@ -1843,7 +1843,7 @@ cdef class tempopulsar:
         mapping tempo2 `telID` values to names by way of the tempo2 runtime file
         `observatory/aliases`."""
 
-        ret = numpy.zeros(self.nobs,dtype='a32')
+        ret = numpy.zeros(self.nobs,dtype='S32')
         for i in range(self.nobs):
             ret[i] = string(self.psr[0].obsn[i].telID)
             if ret[i] in aliases:
@@ -1858,7 +1858,7 @@ cdef class tempopulsar:
         Returns a numpy character array of the filename for each observation,
         corresponding to tempo2 `fname` fields in the observation struct."""
 
-        ret = numpy.zeros(self.nobs,dtype='a' + str(MAX_FILELEN))
+        ret = numpy.zeros(self.nobs,dtype='S' + str(MAX_FILELEN))
         for i in range(self.nobs):
             ret[i] = string(self.psr[0].obsn[i].fname)
 
