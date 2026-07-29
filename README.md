@@ -64,3 +64,102 @@ pip install libstempo
 ## Usage
 
 See [Demo Notebook 1](https://github.com/vallis/libstempo/blob/master/demo/libstempo-demo.ipynb) for basic usage and [Demo Notebook 2](https://github.com/vallis/libstempo/blob/master/demo/libstempo-toasim-demo.ipynb) for simulation usage.
+
+## Sandbox Mode (Crash-Protected)
+
+libstempo includes a sandbox mode that provides crash isolation and automatic retry capabilities. This is particularly useful when working with problematic pulsars or long-running analyses where tempo2 crashes are common.
+
+### Basic Usage
+
+The sandbox provides a drop-in replacement for the standard `tempopulsar` class:
+
+```python
+from libstempo.sandbox import tempopulsar
+
+# Basic usage - same API as regular tempopulsar
+psr = tempopulsar(parfile="J1713.par", timfile="J1713.tim", dofit=False)
+residuals = psr.residuals()
+design_matrix = psr.designmatrix()
+```
+
+### Advanced Configuration
+
+```python
+from libstempo.sandbox import tempopulsar, Policy, configure_logging
+
+# Configure logging for debugging
+configure_logging(level="DEBUG", log_file="tempo2.log")
+
+# Configure retry and timeout policies
+policy = Policy(
+    ctor_retry=5,           # Retry constructor 5 times on failure
+    call_timeout_s=300.0,    # 5-minute timeout per RPC call
+    max_calls_per_worker=1000,  # Recycle worker after 1000 calls
+    max_age_s=3600,          # Recycle worker after 1 hour
+    rss_soft_limit_mb=2048   # Recycle worker if memory exceeds 2GB
+)
+
+psr = tempopulsar(parfile="J1713.par", timfile="J1713.tim", policy=policy)
+```
+
+### Environment Support
+
+The sandbox supports different Python environments:
+
+```python
+# Use virtual/conda environment
+psr = tempopulsar(parfile="J1713.par", timfile="J1713.tim", env_name="tempo2_intel")
+
+# Use system Python with Rosetta (macOS)
+psr = tempopulsar(parfile="J1713.par", timfile="J1713.tim", env_name="arch")
+
+# Use explicit Python path
+psr = tempopulsar(parfile="J1713.par", timfile="J1713.tim", env_name="python:/path/to/python")
+```
+
+### Key Benefits
+
+- **Crash Isolation**: Segfaults in tempo2 only kill the worker process, not your main kernel
+- **Automatic Retry**: Built-in retry logic for transient failures
+- **Worker Recycling**: Prevents memory leaks and resource accumulation
+- **Environment Flexibility**: Support for conda, venv, and Rosetta environments
+- **Enhanced Logging**: Comprehensive logging for debugging and monitoring
+- **Proactive TOA Handling**: Automatically handles large TOA files to prevent "Too many TOAs" errors
+
+### Performance
+
+The sandbox adds ~9x initialization overhead but only ~1.2x overhead for computational operations like `residuals()` and `designmatrix()`. For heavy computations, the overhead becomes negligible relative to the actual work. Use sandbox when stability is critical, direct libstempo when performance is paramount.
+
+### Bulk Loading
+
+For processing many pulsars:
+
+```python
+from libstempo.sandbox import load_many, Policy
+
+pairs = [("J1713.par", "J1713.tim"), ("J1909.par", "J1909.tim"), ...]
+policy = Policy(ctor_retry=3, call_timeout_s=120.0)
+
+ok_by_name, retried_by_name, failed_list = load_many(pairs, policy=policy, parallel=8)
+
+print(f"Successfully loaded: {len(ok_by_name)}")
+print(f"Required retries: {len(retried_by_name)}")
+print(f"Failed: {len(failed_list)}")
+```
+
+### Error Handling
+
+The sandbox defines specific exception types:
+
+```python
+from libstempo.sandbox import Tempo2Error, Tempo2Crashed, Tempo2Timeout
+
+try:
+    psr = tempopulsar(parfile="problematic.par", timfile="problematic.tim")
+except Tempo2Crashed:
+    print("Worker process crashed - likely a segfault")
+except Tempo2Timeout:
+    print("Worker timed out")
+except Tempo2Error as e:
+    print(f"Sandbox error: {e}")
+```

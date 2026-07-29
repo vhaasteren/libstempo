@@ -1,6 +1,9 @@
 import os
 from ._find_tempo2 import find_tempo2_runtime
 
+# Import sandbox functionality
+from .sandbox import tempopulsar as sandbox_tempopulsar, Policy, configure_logging  # noqa: F401
+from .tim_file_analyzer import TimFileAnalyzer  # noqa: F401
 
 # check to see if TEMPO2 environment variable is set
 TEMPO2_RUNTIME = os.getenv("TEMPO2")
